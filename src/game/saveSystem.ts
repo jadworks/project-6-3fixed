@@ -7,10 +7,11 @@ export type CitySave = {
   muted: boolean
   weather: 'day' | 'sunset' | 'rain' | 'night'
   robbedStores: string[]
+  seenIntro?: boolean
 }
 
 const KEY = 'vicebay-nights.progress.v1'
-const defaults = (): CitySave => ({ version: 1, money: 1500, health: 100, completed: [], upgrade: 0, muted: false, weather: 'sunset', robbedStores: [] })
+const defaults = (): CitySave => ({ version: 1, money: 1500, health: 100, completed: [], upgrade: 0, muted: false, weather: 'sunset', robbedStores: [], seenIntro: false })
 
 export function loadCitySave(): CitySave {
   try {
@@ -27,6 +28,7 @@ export function loadCitySave(): CitySave {
       muted: value.muted === true,
       weather: value.weather === 'day' || value.weather === 'sunset' || value.weather === 'rain' || value.weather === 'night' ? value.weather : 'sunset',
       robbedStores: Array.isArray(value.robbedStores) ? value.robbedStores.filter((v): v is string => typeof v === 'string').slice(0, 5) : [],
+      seenIntro: value.seenIntro === true,
     }
   } catch { return defaults() }
 }

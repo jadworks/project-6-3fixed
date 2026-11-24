@@ -2,7 +2,30 @@ import * as THREE from 'three'
 import { CONFIG } from './config'
 import { tuning } from './tuning'
 
-const material = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.88 })
+const material = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.86 })
+
+function makeFootShadow(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    const data = new Uint8Array([0, 0, 0, 120])
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat)
+    tex.needsUpdate = true
+    return tex
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = 48
+  canvas.height = 48
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const grad = ctx.createRadialGradient(24, 24, 3, 24, 24, 22)
+    grad.addColorStop(0, 'rgba(6, 8, 14, 0.72)')
+    grad.addColorStop(1, 'rgba(6, 8, 14, 0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, 48, 48)
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
 
 export class VicePlayer {
   readonly root = new THREE.Group()
@@ -12,6 +35,7 @@ export class VicePlayer {
   private readonly rightArm: THREE.Mesh
   private readonly leftLeg: THREE.Mesh
   private readonly rightLeg: THREE.Mesh
+  private readonly contactShadow: THREE.Mesh
   private vertical = 0
   private gait = 0
   private hitTime = 0
@@ -24,7 +48,7 @@ export class VicePlayer {
     const jacket = material(0x17263d), sidearm = material(0x16191f)
     const mesh = (w: number, h: number, d: number, mat: THREE.Material, x: number, y: number, z: number) => {
       const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
-      part.position.set(x, y, z); part.castShadow = true; return part
+      part.position.set(x, y, z); part.castShadow = true; part.receiveShadow = true; return part
     }
     this.root.add(this.torso)
     this.torso.add(mesh(.74, .83, .4, shirt, 0, 1.48, 0))
@@ -43,9 +67,17 @@ export class VicePlayer {
     pistol.add(mesh(.12, .25, .12, sidearm, 0, -.17, -.02))
     this.torso.add(this.leftArm, this.rightArm, pistol)
     this.root.add(this.leftLeg, this.rightLeg)
+
+    this.contactShadow = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.15, 1.15),
+      new THREE.MeshBasicMaterial({ map: makeFootShadow(), transparent: true, opacity: 0.6, depthWrite: false }),
+    )
+    this.contactShadow.rotation.x = -Math.PI / 2
+    this.contactShadow.position.y = 0.03
+    this.root.add(this.contactShadow)
   }
 
-  update(dt: number, moveX: number, moveY: number, yaw: number, sprint: boolean, crouch: boolean, jump: boolean, swimming: boolean): void {
+  update(dt: number, moveX: number, moveY: number, yaw: number, sprint: boolean, crouch: boolean, jump: boolean, swimming: boolean, supportY = 0): void {
     const sx = Math.sin(yaw), cz = Math.cos(yaw)
     const dx = moveX * cz - moveY * sx
     const dz = -moveX * sx - moveY * cz
@@ -64,9 +96,14 @@ export class VicePlayer {
     }
     if (jump && this.grounded && !swimming) { tuning.activate('jump'); this.vertical = CONFIG.player.jumpSpeed * .65; this.grounded = false }
     this.vertical -= 18 * dt
-    const floor = swimming ? -.75 : 0
+    const floor = swimming ? -.75 : supportY
     this.root.position.y += this.vertical * dt
     if (this.root.position.y <= floor) { this.root.position.y = floor; this.vertical = 0; this.grounded = true }
+    else if (this.root.position.y > floor + 0.08) this.grounded = false
+    this.contactShadow.visible = !swimming
+    this.contactShadow.position.y = Math.max(0.03, floor - this.root.position.y + 0.03)
+    const heightGap = Math.max(0, this.root.position.y - floor)
+    this.contactShadow.scale.setScalar(Math.max(0.5, 1 - heightGap * 0.12))
     this.gait += dt * (sprint ? 12 : 8) * Math.min(1, length)
     const swing = Math.sin(this.gait) * Math.min(.6, length * .6)
     this.leftLeg.rotation.x = swing; this.rightLeg.rotation.x = -swing

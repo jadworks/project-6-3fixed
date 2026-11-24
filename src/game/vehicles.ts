@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import type { WorldCollider, WorldRamp } from './viceWorld'
+import { resolveVehicleWorldCollision, supportHeightAt } from './worldCollision'
 
 /**
  * The root position is the authoritative world position, at ground/water level.
@@ -93,12 +95,22 @@ export class VehicleSystem {
   private readonly scratchDirection = new THREE.Vector3()
   private readonly scratchOrigin = new THREE.Vector3()
   private obstacles: THREE.Object3D[] = []
+  private worldColliders: WorldCollider[] = []
+  private worldRamps: WorldRamp[] = []
   private obstacleRefresh = 0
   private placedBoat = false
   private boatSpawn: THREE.Vector3 | null = null
   private time = 0
+  private readonly headlight = new THREE.SpotLight('#fff2ce', 0, 48, Math.PI / 5.5, 0.55, 1.4)
+  private readonly headlightTarget = new THREE.Object3D()
+  private readonly contactShadowTexture = makeContactShadowTexture()
 
   constructor(private readonly scene: THREE.Scene) {
+    this.headlight.castShadow = false
+    this.headlight.userData.noVehicleCollision = true
+    this.headlightTarget.userData.noVehicleCollision = true
+    this.scene.add(this.headlight, this.headlightTarget)
+    this.headlight.target = this.headlightTarget
     this.addVehicle('car', 'Coastline Sedan', '#f5c84c', 4.6, 16.5, -0.1, CAR)
     this.addVehicle('sport', 'Neon Sport', '#ee518d', -4.8, 17.5, 0.15, SPORT)
     this.addVehicle('motorbike', 'Street Bike', '#45d5e4', 0.0, 23.5, 0, BIKE)
@@ -109,6 +121,52 @@ export class VehicleSystem {
     this.addVehicle('motorbike', 'Dock Bike', '#f4c545', -34, 34, Math.PI / 2, BIKE)
     this.addVehicle('boat', 'Bay Runner', '#4bbad3', 95, 0, Math.PI, BOAT)
     this.addVehicle('helicopter', 'Bay Helicopter', '#d9e3df', 16, 29, 0, HELI)
+  }
+
+  /** Configure authoritative world OBB colliders and ramps for crisp vehicle physics. */
+  setWorldGeometry(colliders: WorldCollider[], ramps: WorldRamp[] = []): void {
+    this.worldColliders = colliders
+    this.worldRamps = ramps
+  }
+
+  /** Push an on-foot player out of parked or moving vehicles. */
+  resolvePlayerCollision(position: THREE.Vector3, playerRadius = 0.44): boolean {
+    let hit = false
+    for (const vehicle of this.vehicles) {
+      if (vehicle === this.active) continue
+      const data = this.parts.get(vehicle)
+      if (!data) continue
+      if (position.y > vehicle.root.position.y + 1.8) continue
+      const dx = position.x - vehicle.root.position.x
+      const dz = position.z - vehicle.root.position.z
+      const limit = data.handling.length + playerRadius + 0.5
+      if (Math.abs(dx) > limit || Math.abs(dz) > limit) continue
+      const c = Math.cos(vehicle.heading)
+      const s = Math.sin(vehicle.heading)
+      const lx = dx * c - dz * s
+      const lz = dx * s + dz * c
+      const hx = data.handling.width
+      const hz = data.handling.length
+      const cx = clamp(lx, -hx, hx)
+      const cz = clamp(lz, -hz, hz)
+      const px = lx - cx
+      const pz = lz - cz
+      const distSq = px * px + pz * pz
+      if (distSq >= playerRadius * playerRadius) continue
+      hit = true
+      let pushLx = 0
+      let pushLz = 0
+      if (distSq > 1e-6) {
+        const dist = Math.sqrt(distSq)
+        pushLx = (px / dist) * (playerRadius - dist)
+        pushLz = (pz / dist) * (playerRadius - dist)
+      } else {
+        pushLx = (lx >= 0 ? 1 : -1) * (hx - Math.abs(lx) + playerRadius)
+      }
+      position.x += pushLx * c + pushLz * s
+      position.z += -pushLx * s + pushLz * c
+    }
+    return hit
   }
 
   /** Only usable vehicles are offered for entry; an occupied wreck can still be exited. */
@@ -152,7 +210,7 @@ export class VehicleSystem {
       this.placedBoat = true
     }
     this.obstacleRefresh -= remaining
-    if (this.obstacleRefresh <= 0) {
+    if (this.obstacleRefresh <= 0 && this.worldColliders.length === 0) {
       this.refreshObstacles()
       this.obstacleRefresh = 1
     }
@@ -176,6 +234,16 @@ export class VehicleSystem {
       }
       this.stepParticles(step)
       remaining -= step
+    }
+    if (this.active && this.active.health > 0) {
+      const fwdX = -Math.sin(this.active.heading)
+      const fwdZ = -Math.cos(this.active.heading)
+      this.headlight.intensity = 18
+      this.headlight.position.set(this.active.root.position.x + fwdX * 1.6, this.active.root.position.y + 1.05, this.active.root.position.z + fwdZ * 1.6)
+      this.headlightTarget.position.set(this.active.root.position.x + fwdX * 18, Math.max(0, this.active.root.position.y - 0.5), this.active.root.position.z + fwdZ * 18)
+      this.headlightTarget.updateMatrixWorld()
+    } else {
+      this.headlight.intensity = 0
     }
   }
 
@@ -222,6 +290,16 @@ export class VehicleSystem {
         object.receiveShadow = true
       }
     })
+    if (type !== 'helicopter' && type !== 'boat') {
+      const shadowPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(handling.width * 2.55, handling.length * 2.3),
+        new THREE.MeshBasicMaterial({ map: this.contactShadowTexture, transparent: true, opacity: 0.55, depthWrite: false }),
+      )
+      shadowPlane.rotation.x = -Math.PI / 2
+      shadowPlane.position.y = 0.032
+      shadowPlane.userData.noVehicleCollision = true
+      root.add(shadowPlane)
+    }
     this.vehicles.push(vehicle)
     this.parts.set(vehicle, parts)
     this.scene.add(root)
@@ -280,17 +358,20 @@ export class VehicleSystem {
     v.velocity.x = this.scratchForward.x * longitudinal + this.scratchRight.x * lateral
     v.velocity.z = this.scratchForward.z * longitudinal + this.scratchRight.z * lateral
 
+    const floorY = this.worldColliders.length > 0 && !helicopter && !boat
+      ? supportHeightAt(v.root.position.x, v.root.position.z, v.root.position.y, this.worldColliders, this.worldRamps, GROUND_Y)
+      : GROUND_Y
     if (helicopter) {
       const desiredLift = v === this.active && v.health > 0 ? throttle * 6 : -3
       v.velocity.y = damp(v.velocity.y, desiredLift, 3, dt)
-      v.root.position.y = clamp(v.root.position.y + v.velocity.y * dt, GROUND_Y, HELICOPTER_CEILING)
-      if ((v.root.position.y <= GROUND_Y && v.velocity.y < 0) || (v.root.position.y >= HELICOPTER_CEILING && v.velocity.y > 0)) v.velocity.y = 0
-    } else if (v.root.position.y > GROUND_Y || v.velocity.y > 0) {
+      v.root.position.y = clamp(v.root.position.y + v.velocity.y * dt, floorY, HELICOPTER_CEILING)
+      if ((v.root.position.y <= floorY && v.velocity.y < 0) || (v.root.position.y >= HELICOPTER_CEILING && v.velocity.y > 0)) v.velocity.y = 0
+    } else if (v.root.position.y > floorY || v.velocity.y > 0) {
       v.velocity.y -= 16 * dt
-      v.root.position.y = Math.max(GROUND_Y, v.root.position.y + v.velocity.y * dt)
-      if (v.root.position.y <= GROUND_Y && v.velocity.y < 0) v.velocity.y = 0
+      v.root.position.y = Math.max(floorY, v.root.position.y + v.velocity.y * dt)
+      if (v.root.position.y <= floorY && v.velocity.y < 0) v.velocity.y = 0
     } else {
-      v.root.position.y = GROUND_Y
+      v.root.position.y = floorY
       v.velocity.y = 0
     }
 
@@ -298,22 +379,62 @@ export class VehicleSystem {
     const dz = v.velocity.z * dt
     const distance = Math.hypot(dx, dz)
     if (distance > 1e-5) {
-      this.scratchDirection.set(dx / distance, 0, dz / distance)
-      const allowed = this.sweepWorld(v, h, this.scratchDirection, distance)
-      v.root.position.x += this.scratchDirection.x * allowed
-      v.root.position.z += this.scratchDirection.z * allowed
-      if (allowed < distance - 1e-4) {
-        const impact = Math.hypot(v.velocity.x, v.velocity.z)
-        v.velocity.x *= -0.12
-        v.velocity.z *= -0.12
-        if (impact > 3 && data.impactCooldown <= 0) {
-          this.damage(v, (impact - 3) * 1.8)
-          data.impactCooldown = 0.6
+      if (this.worldColliders.length > 0) {
+        v.root.position.x += dx
+        v.root.position.z += dz
+        const collision = resolveVehicleWorldCollision(
+          v.root.position,
+          v.heading,
+          h.width,
+          h.length,
+          this.worldColliders,
+          v.velocity,
+          helicopter,
+        )
+        if (collision.hit && collision.impactSpeed > 3.5 && data.impactCooldown <= 0) {
+          this.damage(v, (collision.impactSpeed - 3.5) * 1.6)
+          this.emitSparks(collision.contact, 4)
+          data.impactCooldown = 0.55
+        }
+      } else {
+        this.scratchDirection.set(dx / distance, 0, dz / distance)
+        const allowed = this.sweepWorld(v, h, this.scratchDirection, distance)
+        v.root.position.x += this.scratchDirection.x * allowed
+        v.root.position.z += this.scratchDirection.z * allowed
+        if (allowed < distance - 1e-4) {
+          const impact = Math.hypot(v.velocity.x, v.velocity.z)
+          v.velocity.x *= -0.12
+          v.velocity.z *= -0.12
+          if (impact > 3 && data.impactCooldown <= 0) {
+            this.damage(v, (impact - 3) * 1.8)
+            data.impactCooldown = 0.6
+          }
         }
       }
       this.collideVehicles(v, data)
     }
     v.speed = v.velocity.x * this.scratchForward.x + v.velocity.z * this.scratchForward.z
+  }
+
+  private emitSparks(origin: THREE.Vector3, count: number): void {
+    for (let i = 0; i < count && this.particles.length < PARTICLE_LIMIT; i += 1) {
+      const material = new THREE.MeshBasicMaterial({ color: i % 2 === 0 ? '#ffe57f' : '#ff9642', transparent: true, opacity: 0.95, depthWrite: false })
+      const mesh = new THREE.Mesh(this.particleGeometry, material)
+      mesh.userData.vehicleEffect = true
+      mesh.position.copy(origin)
+      mesh.scale.setScalar(0.08)
+      this.scene.add(mesh)
+      this.particles.push({
+        mesh,
+        velocity: new THREE.Vector3((Math.random() - 0.5) * 8, 2 + Math.random() * 4, (Math.random() - 0.5) * 8),
+        age: 0,
+        life: 0.25 + Math.random() * 0.2,
+        baseSize: 0.08,
+        gravity: -12,
+        spin: new THREE.Vector3(),
+        disposableMaterial: true,
+      })
+    }
   }
 
   private sweepWorld(v: Vehicle, h: Handling, direction: THREE.Vector3, distance: number): number {
@@ -703,4 +824,28 @@ function bar(parent: THREE.Object3D, from: THREE.Vector3, to: THREE.Vector3, rad
   mesh.quaternion.setFromUnitVectors(UP, delta.normalize())
   parent.add(mesh)
   return mesh
+}
+
+function makeContactShadowTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    const data = new Uint8Array([0, 0, 0, 140])
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat)
+    tex.needsUpdate = true
+    return tex
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = 64
+  canvas.height = 64
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const grad = ctx.createRadialGradient(32, 32, 6, 32, 32, 31)
+    grad.addColorStop(0, 'rgba(6, 8, 14, 0.85)')
+    grad.addColorStop(0.55, 'rgba(6, 8, 14, 0.45)')
+    grad.addColorStop(1, 'rgba(6, 8, 14, 0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, 64, 64)
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
 }

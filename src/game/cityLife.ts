@@ -1,5 +1,7 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
+import type { WorldCollider } from './viceWorld'
+import { hasLineOfSight, worldRayDistance } from './worldCollision'
 
 /**
  * Lightweight city-life simulation for a flat, y=0 city. Integration:
@@ -116,6 +118,10 @@ export class CityLife {
   private readonly rotor = new THREE.Group()
   private readonly tailRotor = new THREE.Group()
   private readonly heliLight: THREE.Mesh
+  private readonly heliSpot = new THREE.SpotLight('#fff6cf', 0, 58, Math.PI / 6.2, 0.52, 1.3)
+  private readonly heliSpotTarget = new THREE.Object3D()
+  private worldColliders: WorldCollider[] = []
+  private readonly barrierCooldowns = [0, 0]
   private particleCursor = 0
   private traceCursor = 0
   private time = 0
@@ -127,6 +133,10 @@ export class CityLife {
   constructor(scene: THREE.Scene) {
     this.group.name = 'City life'
     scene.add(this.group)
+    this.heliSpot.castShadow = false
+    this.heliSpotTarget.userData.noVehicleCollision = true
+    this.group.add(this.heliSpotTarget)
+    this.heliSpot.target = this.heliSpotTarget
     for (let i = 0; i < MAX_PEDESTRIANS; i += 1) this.people.push(this.makePerson(false, i))
     for (let i = 0; i < MAX_OFFICERS; i += 1) this.officers.push(this.makePerson(true, i))
     this.makeTraffic()
@@ -160,12 +170,147 @@ export class CityLife {
     }
   }
 
+  /** Supply world building/container colliders for realistic cover and police sightlines. */
+  setWorldColliders(colliders: WorldCollider[]): void {
+    this.worldColliders = colliders
+  }
+
+  /** True if any upright civilian is close enough to witness a crime and call dispatch. */
+  hasWitnessNearby(origin: THREE.Vector3, radius = 24): boolean {
+    const rSq = radius * radius
+    for (const person of this.people) {
+      if (!person.active || person.down > 0) continue
+      const dx = person.root.position.x - origin.x
+      const dz = person.root.position.z - origin.z
+      if (dx * dx + dz * dz <= rSq) return true
+    }
+    return false
+  }
+
+  /** True if any police officer, patrol car, or Level 4+ helicopter has clear line-of-sight to the player. */
+  hasPoliceLineOfSight(playerPos: THREE.Vector3): boolean {
+    const eyeTarget = new THREE.Vector3(playerPos.x, playerPos.y + 1.25, playerPos.z)
+    const eyeFrom = new THREE.Vector3()
+    for (const officer of this.officers) {
+      if (!officer.active || officer.down > 0) continue
+      const distSq = officer.root.position.distanceToSquared(playerPos)
+      if (distSq > 34 * 34) continue
+      eyeFrom.set(officer.root.position.x, officer.root.position.y + 1.55, officer.root.position.z)
+      if (this.worldColliders.length === 0 || hasLineOfSight(eyeFrom, eyeTarget, this.worldColliders)) return true
+    }
+    for (const car of this.vehicles) {
+      if (!car.patrol || car.crash > 0) continue
+      const distSq = car.root.position.distanceToSquared(playerPos)
+      if (distSq > 42 * 42) continue
+      eyeFrom.set(car.root.position.x, car.root.position.y + 1.4, car.root.position.z)
+      if (this.worldColliders.length === 0 || hasLineOfSight(eyeFrom, eyeTarget, this.worldColliders)) return true
+    }
+    if (this.helicopter.visible) {
+      const dx = this.helicopter.position.x - playerPos.x
+      const dz = this.helicopter.position.z - playerPos.z
+      if (dx * dx + dz * dz <= 28 * 28) {
+        if (this.worldColliders.length === 0 || hasLineOfSight(this.helicopter.position, eyeTarget, this.worldColliders)) return true
+      }
+    }
+    return false
+  }
+
+  /** Active police unit coordinates for the minimap radar. */
+  getPoliceBlips(): { x: number; z: number; kind: 'cop' | 'heli' }[] {
+    const blips: { x: number; z: number; kind: 'cop' | 'heli' }[] = []
+    for (const officer of this.officers) {
+      if (officer.active && officer.down <= 0) blips.push({ x: officer.root.position.x, z: officer.root.position.z, kind: 'cop' })
+    }
+    for (const car of this.vehicles) {
+      if (car.patrol) blips.push({ x: car.root.position.x, z: car.root.position.z, kind: 'cop' })
+    }
+    if (this.helicopter.visible) blips.push({ x: this.helicopter.position.x, z: this.helicopter.position.z, kind: 'heli' })
+    return blips
+  }
+
+  /** Resolve player or driven-vehicle collisions against traffic cars and active police roadblocks. */
+  resolveDynamicCollisions(
+    position: THREE.Vector3,
+    velocity: THREE.Vector3,
+    isVehicle: boolean,
+    actorRadius: number,
+  ): { hitTraffic: boolean; hitRoadblock: boolean; impactSpeed: number } {
+    let hitTraffic = false
+    let hitRoadblock = false
+    let maxImpact = 0
+    if (position.y > 2.4) return { hitTraffic, hitRoadblock, impactSpeed: 0 }
+
+    for (const car of this.vehicles) {
+      const dx = position.x - car.root.position.x
+      const dz = position.z - car.root.position.z
+      const min = actorRadius + 1.45
+      const distSq = dx * dx + dz * dz
+      if (distSq >= min * min) continue
+      const dist = Math.sqrt(distSq) || 0.01
+      const nx = dx / dist
+      const nz = dz / dist
+      const pen = min - dist
+      position.x += nx * pen
+      position.z += nz * pen
+      if (isVehicle) {
+        const rel = Math.hypot(velocity.x, velocity.z)
+        if (rel > 2.5) {
+          maxImpact = Math.max(maxImpact, rel)
+          velocity.x *= 0.62
+          velocity.z *= 0.62
+          velocity.x += nx * rel * 0.28
+          velocity.z += nz * rel * 0.28
+          car.crash = Math.max(car.crash, 2.8)
+          car.speed *= 0.25
+          this.emit(car.root.position.clone().add(new THREE.Vector3(0, 1.1, 0)), '#ffb25f', 4, false)
+          hitTraffic = true
+        }
+      } else {
+        hitTraffic = true
+      }
+    }
+
+    for (let i = 0; i < this.barriers.length; i += 1) {
+      const block = this.barriers[i]
+      if (!block.visible || this.barrierCooldowns[i] > 0) continue
+      const dx = position.x - block.position.x
+      const dz = position.z - block.position.z
+      const halfW = 9.0 + actorRadius
+      const halfD = 0.65 + actorRadius
+      if (Math.abs(dx) < halfW && Math.abs(dz) < halfD) {
+        const speed = Math.hypot(velocity.x, velocity.z)
+        if (isVehicle && speed >= 13) {
+          // Smash straight through the roadblock at high speed!
+          block.visible = false
+          this.barrierCooldowns[i] = 6
+          velocity.multiplyScalar(0.72)
+          this.emit(block.position.clone().add(new THREE.Vector3(0, 1, 0)), '#ffaa55', 8, true)
+          hitRoadblock = true
+          maxImpact = Math.max(maxImpact, speed * 0.7)
+        } else {
+          const signZ = dz >= 0 ? 1 : -1
+          position.z = block.position.z + signZ * halfD
+          if (isVehicle) {
+            maxImpact = Math.max(maxImpact, speed)
+            velocity.z *= -0.25
+            velocity.x *= 0.7
+          }
+          hitRoadblock = true
+        }
+      }
+    }
+
+    return { hitTraffic, hitRoadblock, impactSpeed: maxImpact }
+  }
+
   /** Advance movements and visible effects. Player is a world-space position. */
-  update(dt: number, player: THREE.Vector3, wanted: number): void {
+  update(dt: number, player: THREE.Vector3, wanted: number, searchTarget?: THREE.Vector3): void {
     dt = safeStep(dt)
     if (dt === 0) return
     const level = levelOf(wanted)
+    const navTarget = searchTarget ?? player
     this.time += dt
+    for (let i = 0; i < this.barrierCooldowns.length; i += 1) this.barrierCooldowns[i] = Math.max(0, this.barrierCooldowns[i] - dt)
     const activeOfficers = Math.min(MAX_OFFICERS, Math.max(1, level))
     for (let i = 0; i < this.officers.length; i += 1) {
       const officer = this.officers[i]
@@ -180,11 +325,11 @@ export class CityLife {
       officer.active = active
       officer.root.visible = active
     }
-    for (const person of this.people) this.updatePerson(person, dt, player, level)
-    for (const officer of this.officers) if (officer.active) this.updatePerson(officer, dt, player, level)
-    for (const vehicle of this.vehicles) this.updateVehicle(vehicle, dt, player, level)
-    this.updateRoadblocks(player, level)
-    this.updateHelicopter(dt, player, level)
+    for (const person of this.people) this.updatePerson(person, dt, navTarget, level)
+    for (const officer of this.officers) if (officer.active) this.updatePerson(officer, dt, navTarget, level)
+    for (const vehicle of this.vehicles) this.updateVehicle(vehicle, dt, navTarget, level)
+    this.updateRoadblocks(navTarget, level)
+    this.updateHelicopter(dt, navTarget, level)
     this.updateBirds(dt, player)
     this.updateEffects(dt)
     this.lastWanted = level
@@ -207,13 +352,13 @@ export class CityLife {
     }
   }
 
-  /** Nearest person struck by a ray, with a visible tracer. Does not raycast walls. */
+  /** Nearest person struck by a ray, clipped against solid world colliders. */
   shoot(origin: THREE.Vector3, direction: THREE.Vector3, range: number): boolean {
     this.startle(origin)
     const length = direction.length()
     if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(length) || length < 1e-6) return false
     const dir = direction.clone().multiplyScalar(1 / length)
-    let nearest = range
+    let nearest = this.worldColliders.length > 0 ? worldRayDistance(origin, dir, this.worldColliders, range) : range
     let target: Pedestrian | undefined
     for (const person of [...this.people, ...this.officers]) {
       if (!person.active) continue
@@ -284,7 +429,7 @@ export class CityLife {
     }
     return null
   }
-  /** Incoming police HP damage this step; projectiles are cosmetic and ignore walls. */
+  /** Incoming police HP damage this step; buildings and containers block shots when colliders are configured. */
   getDamage(player: THREE.Vector3, dt: number, wanted: number): number {
     dt = safeStep(dt)
     const level = levelOf(wanted)
@@ -298,10 +443,12 @@ export class CityLife {
       const dz = officer.root.position.z - player.z
       if (officer.fire <= 0 && dx * dx + dz * dz < (19 + level * 2) ** 2 && Math.abs(player.y) < 9) {
         const muzzle = officer.root.position.clone().add(new THREE.Vector3(0, 1.38, 0))
+        const blocked = this.worldColliders.length > 0 && !hasLineOfSight(muzzle, target, this.worldColliders)
+        officer.fire = 1.3 + this.random() * 0.7
+        if (blocked) continue
         this.addTrace(muzzle, target, true)
         this.emit(muzzle, '#ffd17a', 2, false)
         damage += 3 + level * 0.35
-        officer.fire = 1.3 + this.random() * 0.7
       }
     }
     for (const car of this.vehicles) {
@@ -310,9 +457,12 @@ export class CityLife {
       const dx = car.root.position.x - player.x
       const dz = car.root.position.z - player.z
       if (car.fire <= 0 && dx * dx + dz * dz < 16 * 16 && Math.abs(player.y) < 8) {
-        this.addTrace(car.root.position.clone().add(new THREE.Vector3(0, 1.45, 0)), target, true)
-        damage += 2.5 + level * 0.25
+        const muzzle = car.root.position.clone().add(new THREE.Vector3(0, 1.45, 0))
+        const blocked = this.worldColliders.length > 0 && !hasLineOfSight(muzzle, target, this.worldColliders)
         car.fire = 2.1 + this.random()
+        if (blocked) continue
+        this.addTrace(muzzle, target, true)
+        damage += 2.5 + level * 0.25
       }
     }
     if (level >= 4 && this.helicopter.visible) {
@@ -320,9 +470,13 @@ export class CityLife {
       const dx = this.helicopter.position.x - player.x
       const dz = this.helicopter.position.z - player.z
       if (this.heliFire <= 0 && dx * dx + dz * dz < 30 * 30) {
-        this.addTrace(this.helicopter.position.clone().add(new THREE.Vector3(0, -0.5, 0)), target, true)
-        damage += 4 + (level - 4)
+        const muzzle = this.helicopter.position.clone().add(new THREE.Vector3(0, -0.5, 0))
+        const blocked = this.worldColliders.length > 0 && !hasLineOfSight(muzzle, target, this.worldColliders)
         this.heliFire = 2.4
+        if (!blocked) {
+          this.addTrace(muzzle, target, true)
+          damage += 4 + (level - 4)
+        }
       }
     }
     return damage
@@ -347,6 +501,8 @@ export class CityLife {
     const mesh = new THREE.Mesh(this.boxGeometry, this.material(color, emissive))
     mesh.position.set(x, y, z)
     mesh.scale.set(width, height, depth)
+    mesh.castShadow = !emissive
+    mesh.receiveShadow = true
     parent.add(mesh)
     return mesh
   }
@@ -355,6 +511,8 @@ export class CityLife {
     const mesh = new THREE.Mesh(this.sphereGeometry, this.material(color))
     mesh.position.set(x, y, z)
     mesh.scale.set(sx, sy, sz)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
     parent.add(mesh)
     return mesh
   }
@@ -384,6 +542,8 @@ export class CityLife {
       this.compoundGeometries.set(key, geometry)
     }
     const mesh = new THREE.Mesh(geometry, light ? this.compoundLightMaterial : this.compoundMaterial)
+    mesh.castShadow = !light
+    mesh.receiveShadow = true
     parent.add(mesh)
     return mesh
   }
@@ -678,7 +838,7 @@ export class CityLife {
   private updateRoadblocks(player: THREE.Vector3, wanted: number): void {
     for (let i = 0; i < this.barriers.length; i += 1) {
       const block = this.barriers[i]
-      const active = wanted >= (i === 0 ? 3 : 4)
+      const active = wanted >= (i === 0 ? 3 : 4) && this.barrierCooldowns[i] <= 0
       if (active && (!block.visible || Math.abs(block.position.z - player.z) > 90)) {
         block.position.z = THREE.MathUtils.clamp(player.z + (i === 0 ? 32 : -32), -245, 245)
       }
@@ -712,6 +872,8 @@ export class CityLife {
     light.position.set(0, -7.7, 0)
     light.scale.set(4.5, 14, 4.5)
     this.helicopter.add(light)
+    this.heliSpot.position.set(0, -0.5, 0.8)
+    this.helicopter.add(this.heliSpot)
     this.helicopter.position.set(20, 15, -20)
     this.helicopter.visible = false
     this.group.add(this.helicopter)
@@ -725,6 +887,7 @@ export class CityLife {
       this.heliFire = 2
     }
     this.helicopter.visible = active
+    this.heliSpot.intensity = active ? 42 : 0
     if (!active) return
     const angle = this.time * 0.32
     const tx = player.x + Math.cos(angle) * 11
@@ -740,6 +903,8 @@ export class CityLife {
       this.helicopter.rotation.y = angleDamp(this.helicopter.rotation.y, Math.atan2(player.x - pos.x, player.z - pos.z), 2, dt)
     }
     pos.y = THREE.MathUtils.damp(pos.y, Math.max(15, player.y + 14) + Math.sin(this.time * 2) * 0.4, 2, dt)
+    this.heliSpotTarget.position.set(player.x + Math.sin(this.time * 1.1) * 2.5, 0, player.z + Math.cos(this.time * 0.9) * 2.5)
+    this.heliSpotTarget.updateMatrixWorld()
     this.rotor.rotation.y += dt * 28
     this.tailRotor.rotation.x += dt * 35
     this.heliLight.rotation.z = Math.sin(this.time) * 0.06

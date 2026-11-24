@@ -3,10 +3,10 @@ import * as THREE from 'three'
 export type FloatUniform = { value: number }
 export type FacadeControls = { time: FloatUniform; night: FloatUniform; rain: FloatUniform }
 
-/** Standard lighting and shadows are retained; windows are drawn in world-sized facade cells. */
+/** Standard lighting and shadows are retained; windows are drawn in world-sized facade cells with PBR glass gloss. */
 export function createFacadeMaterial(): { material: THREE.MeshStandardMaterial; controls: FacadeControls } {
   const controls: FacadeControls = { time: { value: 0 }, night: { value: 0 }, rain: { value: 0 } }
-  const material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.82, metalness: 0.02 })
+  const material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.82, metalness: 0.04 })
   material.onBeforeCompile = shader => {
     shader.uniforms.uViceTime = controls.time
     shader.uniforms.uViceNight = controls.night
@@ -33,27 +33,39 @@ export function createFacadeMaterial(): { material: THREE.MeshStandardMaterial; 
         float viceAlong = abs(vViceNormal.x) > 0.5 ? vVicePosition.z : vVicePosition.x;
         vec2 viceGrid = vec2(viceAlong / 2.4, vVicePosition.y / 2.8);
         vec2 viceCell = fract(viceGrid);
-        float viceWindow = viceSide * step(0.19, viceCell.x) * step(viceCell.x, 0.79)
-          * step(0.24, viceCell.y) * step(viceCell.y, 0.78) * step(3.0, vVicePosition.y);
-        float viceLit = step(0.34, viceHash(floor(viceGrid) + floor(vVicePosition.xz * 0.07)));
-        vec3 viceGlass = mix(vec3(0.12, 0.27, 0.30), vec3(0.25, 0.43, 0.46), viceCell.y);
-        viceGlass = mix(viceGlass, vec3(0.89, 0.60, 0.34), uViceNight * viceLit * 0.72);
-        diffuseColor.rgb = mix(diffuseColor.rgb, viceGlass, viceWindow * 0.82);
-        diffuseColor.rgb *= 1.0 - uViceRain * 0.12;`)
+        float viceWindow = viceSide * step(0.18, viceCell.x) * step(viceCell.x, 0.80)
+          * step(0.22, viceCell.y) * step(viceCell.y, 0.79) * step(3.0, vVicePosition.y);
+        float viceMullion = viceWindow * step(0.46, viceCell.x) * step(viceCell.x, 0.52);
+        float viceLit = step(0.32, viceHash(floor(viceGrid) + floor(vVicePosition.xz * 0.07)));
+        float viceWarm = step(0.55, viceHash(floor(viceGrid) * 1.7 + 3.1));
+        vec3 viceGlass = mix(vec3(0.09, 0.22, 0.28), vec3(0.24, 0.46, 0.54), viceCell.y);
+        vec3 viceInterior = mix(vec3(0.92, 0.62, 0.34), vec3(0.58, 0.84, 0.96), viceWarm * 0.35);
+        viceGlass = mix(viceGlass, viceInterior, uViceNight * viceLit * 0.78);
+        float vicePane = max(0.0, viceWindow - viceMullion * 0.65);
+        diffuseColor.rgb = mix(diffuseColor.rgb, viceGlass, vicePane * 0.85);
+        float viceAo = smoothstep(0.0, 2.2, vVicePosition.y);
+        diffuseColor.rgb *= (0.82 + 0.18 * viceAo) * (1.0 - uViceRain * 0.14);`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        float viceGlossMask = (1.0 - step(0.5, abs(vViceNormal.y))) * step(3.0, vVicePosition.y);
+        vec2 viceRCell = fract(vec2((abs(vViceNormal.x) > 0.5 ? vVicePosition.z : vVicePosition.x) / 2.4, vVicePosition.y / 2.8));
+        float viceWinR = viceGlossMask * step(0.18, viceRCell.x) * step(viceRCell.x, 0.80) * step(0.22, viceRCell.y) * step(viceRCell.y, 0.79);
+        roughnessFactor = mix(roughnessFactor * (1.0 - uViceRain * 0.28), 0.14, viceWinR);`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         float viceFlicker = 0.94 + 0.06 * sin(uViceTime * 0.7 + viceHash(floor(viceGrid)) * 6.28318);
-        totalEmissiveRadiance += vec3(1.0, 0.58, 0.26) * viceWindow * viceLit * uViceNight * 0.65 * viceFlicker;`)
+        vec3 viceEmit = mix(vec3(1.0, 0.62, 0.28), vec3(0.45, 0.85, 1.0), viceWarm * 0.25);
+        totalEmissiveRadiance += viceEmit * vicePane * viceLit * uViceNight * 0.75 * viceFlicker;`)
   }
-  material.customProgramCacheKey = () => 'vice-facades-v2'
+  material.customProgramCacheKey = () => 'vice-facades-v3'
   return { material, controls }
 }
 
-/** Horizontal, gently animated water; all functions are bounded for every input. */
+/** Horizontal, gently animated coastal water with Fresnel sky reflection, sun glint, and shoreline foam. */
 export function createWaterMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
       uTime: { value: 0 }, uNight: { value: 0 }, uRain: { value: 0 },
-      uDeep: { value: new THREE.Color('#168b98') }, uLight: { value: new THREE.Color('#67d9c9') },
+      uDeep: { value: new THREE.Color('#0c6e7f') }, uLight: { value: new THREE.Color('#5ad3c6') },
+      uSky: { value: new THREE.Color('#f7c9ae') },
     }]),
     fog: true,
     side: THREE.DoubleSide,
@@ -61,31 +73,43 @@ export function createWaterMaterial(): THREE.ShaderMaterial {
       uniform float uTime;
       varying vec2 vWater;
       varying float vWave;
+      varying vec3 vWorldPos;
       #include <fog_pars_vertex>
       void main() {
         vec3 p = position;
         vec4 wp = modelMatrix * vec4(p, 1.0);
-        float wave = sin(wp.x * 0.10 + uTime * 0.65) * 0.09
-          + sin(wp.z * 0.14 - uTime * 0.45 + wp.x * 0.035) * 0.065;
+        float wave = sin(wp.x * 0.11 + uTime * 0.72) * 0.10
+          + sin(wp.z * 0.15 - uTime * 0.48 + wp.x * 0.035) * 0.075
+          + cos((wp.x - wp.z) * 0.22 + uTime * 1.1) * 0.03;
         p.y += wave;
+        wp = modelMatrix * vec4(p, 1.0);
         vWave = wave;
         vWater = wp.xz;
+        vWorldPos = wp.xyz;
         vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         #include <fog_vertex>
       }`,
     fragmentShader: /* glsl */ `
       uniform float uTime; uniform float uNight; uniform float uRain;
-      uniform vec3 uDeep; uniform vec3 uLight;
-      varying vec2 vWater; varying float vWave;
+      uniform vec3 uDeep; uniform vec3 uLight; uniform vec3 uSky;
+      varying vec2 vWater; varying float vWave; varying vec3 vWorldPos;
       #include <fog_pars_fragment>
       void main() {
         float wave = sin(vWater.x * 0.21 + uTime * 0.8) * sin(vWater.y * 0.17 - uTime * 0.55);
-        float ripple = sin(vWater.x * 0.72 + vWater.y * 0.41 + uTime * 1.5);
-        float glint = smoothstep(0.82, 0.97, wave) * (0.20 + 0.08 * (1.0 - uRain));
-        float blend = clamp(0.43 + wave * 0.13 + vWave * 0.5 + ripple * uRain * 0.04, 0.0, 1.0);
-        vec3 color = mix(uDeep, uLight, blend) + vec3(0.38, 0.43, 0.38) * glint;
-        color = mix(color, color * vec3(0.28, 0.45, 0.62), uNight * 0.72);
+        float ripple = sin(vWater.x * 0.72 + vWater.y * 0.41 + uTime * 1.6);
+        vec3 n = normalize(vec3(cos(vWater.x * 0.21 + uTime * 0.8) * 0.18, 1.0, sin(vWater.y * 0.19 - uTime * 0.6) * 0.18));
+        vec3 viewDir = normalize(cameraPosition - vWorldPos);
+        float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.2);
+        float glint = smoothstep(0.76, 0.96, wave + ripple * 0.25) * (0.24 + 0.10 * (1.0 - uRain));
+        float blend = clamp(0.45 + wave * 0.14 + vWave * 0.55 + ripple * uRain * 0.05, 0.0, 1.0);
+        vec3 waterCol = mix(uDeep, uLight, blend);
+        waterCol = mix(waterCol, waterCol * vec3(0.28, 0.46, 0.65), uNight * 0.68);
+        vec3 skyRefl = mix(uSky, vec3(0.25, 0.35, 0.58), uNight * 0.82);
+        vec3 color = mix(waterCol, skyRefl, fresnel * 0.55) + vec3(0.42, 0.46, 0.40) * glint;
+        float shoreDist = abs(vWater.x - 85.5);
+        float foamBand = smoothstep(3.2, 0.2, shoreDist + sin(vWater.y * 0.24 + uTime * 1.5) * 0.8);
+        color = mix(color, vec3(0.86, 0.95, 0.96), foamBand * (0.55 - uNight * 0.25));
         gl_FragColor = vec4(color, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>

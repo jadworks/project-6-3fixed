@@ -27,10 +27,10 @@ const BOUNDS = 380
 const CROSS_STREETS = [-320, -240, -160, -80, 0, 80, 160, 240, 320]
 const LONG_STREETS = [{ x: 0, width: 20 }, { x: -70, width: 14 }, { x: -130, width: 12 }, { x: -205, width: 12 }, { x: -280, width: 10 }, { x: 45, width: 10 }]
 const ATMOSPHERES: Record<ViceWeather, Atmosphere> = {
-  day: { top: '#66bdda', horizon: '#f9d3b9', sun: '#fff0d0', ground: '#776c67', ambient: 1.45, sunlight: 2.15, fogNear: 145, fogFar: 560, night: 0, rain: 0, sunGlow: 0.8 },
-  sunset: { top: '#7567a9', horizon: '#ffac8d', sun: '#ffb67c', ground: '#745772', ambient: 1.1, sunlight: 1.6, fogNear: 120, fogFar: 520, night: 0.42, rain: 0, sunGlow: 1.15 },
-  rain: { top: '#708998', horizon: '#a7b9bc', sun: '#cbd6df', ground: '#566769', ambient: 0.93, sunlight: 0.85, fogNear: 80, fogFar: 350, night: 0.22, rain: 1, sunGlow: 0.12 },
-  night: { top: '#141d45', horizon: '#36436b', sun: '#8ba6e7', ground: '#222440', ambient: 0.4, sunlight: 0.3, fogNear: 110, fogFar: 480, night: 1, rain: 0, sunGlow: 0.05 },
+  day: { top: '#5ab6d9', horizon: '#f9d3b9', sun: '#fff1d2', ground: '#786c65', ambient: 1.35, sunlight: 2.35, fogNear: 145, fogFar: 560, night: 0, rain: 0, sunGlow: 0.85 },
+  sunset: { top: '#6d5ea5', horizon: '#ff9d7b', sun: '#ffaa6c', ground: '#6f506b', ambient: 1.0, sunlight: 1.95, fogNear: 120, fogFar: 520, night: 0.42, rain: 0, sunGlow: 1.25 },
+  rain: { top: '#688291', horizon: '#a0b3b7', sun: '#cbd6df', ground: '#526265', ambient: 0.92, sunlight: 1.05, fogNear: 80, fogFar: 350, night: 0.22, rain: 1, sunGlow: 0.14 },
+  night: { top: '#0e1639', horizon: '#2b3962', sun: '#8eb0ff', ground: '#1e223c', ambient: 0.52, sunlight: 0.78, fogNear: 110, fogFar: 480, night: 1, rain: 0, sunGlow: 0.18 },
 }
 
 function makeRandom(seed: number): () => number {
@@ -174,14 +174,15 @@ export class ViceWorld {
     this.sky.frustumCulled = false
     this.scene.add(this.sky, this.ambient, this.sun, this.sun.target)
     this.sun.castShadow = true
-    this.sun.shadow.mapSize.set(1024, 1024)
+    this.sun.shadow.mapSize.set(2048, 2048)
     const shadow = this.sun.shadow.camera
-    shadow.left = shadow.bottom = -68
-    shadow.right = shadow.top = 68
+    shadow.left = shadow.bottom = -58
+    shadow.right = shadow.top = 58
     shadow.near = 1
-    shadow.far = 340
-    this.sun.shadow.bias = -0.00025
-    this.sun.shadow.normalBias = 0.045
+    shadow.far = 320
+    this.sun.shadow.bias = -0.00028
+    this.sun.shadow.normalBias = 0.028
+    this.sun.shadow.radius = 2.4
 
     this.makeGround()
     this.makeRoads()
@@ -228,19 +229,26 @@ export class ViceWorld {
     this.waterMaterial.uniforms.uTime.value = this.time
     this.waterMaterial.uniforms.uNight.value = this.facadeControls.night.value
     this.waterMaterial.uniforms.uRain.value = this.facadeControls.rain.value
+    if (this.waterMaterial.uniforms.uSky) colorTo(this.waterMaterial.uniforms.uSky.value as THREE.Color, target.horizon)
     this.skyMaterial.uniforms.uSunStrength.value = THREE.MathUtils.lerp(this.skyMaterial.uniforms.uSunStrength.value as number, target.sunGlow, blend)
     this.rainMaterial.uniforms.uTime.value = this.time
     this.rain.visible = this.facadeControls.rain.value > 0.08
     this.rain.position.set(player.x, player.y, player.z)
     this.sky.position.copy(player)
-    this.sun.position.set(player.x - 48, player.y + 85, player.z + 50)
-    this.sun.target.position.copy(player)
+    // Snap directional shadow target to texel grid to eliminate shadow swimming during camera movement.
+    const texel = 116 / (this.sun.shadow.mapSize.x || 2048)
+    const snapX = Math.round(player.x / texel) * texel
+    const snapZ = Math.round(player.z / texel) * texel
+    const sunHeight = weather === 'sunset' ? 54 : weather === 'night' ? 76 : 88
+    this.sun.position.set(snapX - 52, player.y + sunHeight, snapZ + 48)
+    this.sun.target.position.set(snapX, 0, snapZ)
+    this.sun.target.updateMatrixWorld()
     const neon = 0.22 + this.facadeControls.night.value * (1.3 + 0.08 * Math.sin(this.time * 2))
     this.neonPink.emissiveIntensity = neon
     this.neonCyan.emissiveIntensity = neon * 0.9
     for (const material of this.asphaltMaterials) {
-      material.roughness = 0.95 - 0.48 * this.facadeControls.rain.value
-      material.metalness = 0.04 + 0.13 * this.facadeControls.rain.value
+      material.roughness = 0.95 - 0.52 * this.facadeControls.rain.value
+      material.metalness = 0.05 + 0.16 * this.facadeControls.rain.value
     }
     this.cullTimer += step
     if (this.cullTimer >= 0.4) {
@@ -527,6 +535,8 @@ export class ViceWorld {
       this.trunks.add(x, 1.4, z, 0.35, 2.8, 0.35, '#eee2c6')
       const umbrella = new THREE.Mesh(new THREE.ConeGeometry(2.1, 0.8, 8, 1), new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.9 }))
       umbrella.position.set(x, 3.0, z)
+      umbrella.castShadow = true
+      umbrella.receiveShadow = true
       this.scene.add(umbrella)
       this.smallBoxes.add(x + 2.8, 0.32, z, 1.8, 0.2, 3.1, '#eee3c8', 0.25)
     }
