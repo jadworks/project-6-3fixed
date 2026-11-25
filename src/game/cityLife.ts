@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import type { WorldCollider } from './viceWorld'
 import { hasLineOfSight, worldRayDistance } from './worldCollision'
+import { WITNESS_CALL_SECONDS, WITNESS_RADIUS, WitnessManager } from './witnessManager'
 
 /**
  * Lightweight city-life simulation for a flat, y=0 city. Integration:
@@ -44,7 +45,21 @@ export type WitnessEventState = {
   cancelledReason: 'intimidated' | 'down' | 'escaped' | null
 }
 
+export type HitZone = 'head' | 'torso' | 'limb'
+
+export type BallisticHitResult = {
+  hit: boolean
+  hitType: 'none' | 'person' | 'cop'
+  zone: HitZone
+  distance: number
+  point: THREE.Vector3
+  critical: boolean
+  armorBroken: boolean
+  killed: boolean
+}
+
 type Pedestrian = {
+  id: string
   root: THREE.Group
   model: THREE.Group
   leftLeg: THREE.Group
@@ -67,6 +82,9 @@ type Pedestrian = {
   down: number
   hitLock: number
   fire: number
+  hp: number
+  maxHp: number
+  armor: number
   witnessState: WitnessState
   shockTimer: number
   reportTimer: number
@@ -105,8 +123,6 @@ const MAX_OFFICERS = 6
 const PARTICLE_COUNT = 48
 const TRACE_COUNT = 10
 const TAU = Math.PI * 2
-const WITNESS_RADIUS = 45
-const WITNESS_CALL_SECONDS = 3.5
 
 function safeStep(dt: number): number {
   return Number.isFinite(dt) ? THREE.MathUtils.clamp(dt, 0, 0.1) : 0
@@ -181,6 +197,7 @@ export class CityLife {
   private heliFire = 1.8
   private randomState = 0x765ba9
   private readonly color = new THREE.Color()
+  readonly witnessManager = new WitnessManager(WITNESS_RADIUS, WITNESS_CALL_SECONDS)
   private pendingCompletedReport: { x: number; z: number; severity: number } | null = null
   private pendingCancelReason: 'intimidated' | 'down' | 'escaped' | null = null
 
@@ -191,8 +208,18 @@ export class CityLife {
     this.heliSpotTarget.userData.noVehicleCollision = true
     this.group.add(this.heliSpotTarget)
     this.heliSpot.target = this.heliSpotTarget
-    for (let i = 0; i < MAX_PEDESTRIANS; i += 1) this.people.push(this.makePerson(false, i))
+    for (let i = 0; i < MAX_PEDESTRIANS; i += 1) {
+      const ped = this.makePerson(false, i)
+      this.people.push(ped)
+      this.witnessManager.registerNpc(ped.id, ped.root.position, ped.active)
+    }
     for (let i = 0; i < MAX_OFFICERS; i += 1) this.officers.push(this.makePerson(true, i))
+    this.witnessManager.on('dispatch', ev => {
+      this.pendingCompletedReport = { x: ev.x, z: ev.z, severity: ev.severity }
+    })
+    this.witnessManager.on('cancelled', ev => {
+      this.pendingCancelReason = ev.reason
+    })
     this.makeTraffic()
     this.makeRoadblocks()
     this.heliLight = this.makeHelicopter()
@@ -227,71 +254,44 @@ export class CityLife {
   /** Supply world building/container colliders for realistic cover and police sightlines. */
   setWorldColliders(colliders: WorldCollider[]): void {
     this.worldColliders = colliders
+    this.witnessManager.setWorldColliders(colliders)
   }
 
   /** True if any upright civilian is close enough (default 45m) with LOS to witness a crime. */
   hasWitnessNearby(origin: THREE.Vector3, radius = WITNESS_RADIUS): boolean {
-    const rSq = radius * radius
-    const from = new THREE.Vector3()
-    const target = new THREE.Vector3(origin.x, origin.y + 1.25, origin.z)
     for (const person of this.people) {
-      if (!person.active || person.down > 0) continue
-      const dx = person.root.position.x - origin.x
-      const dz = person.root.position.z - origin.z
-      if (dx * dx + dz * dz > rSq) continue
-      if (this.worldColliders.length === 0) return true
-      from.set(person.root.position.x, person.root.position.y + 1.55, person.root.position.z)
-      if (hasLineOfSight(from, target, this.worldColliders)) return true
+      this.witnessManager.syncActorPose(person.id, person.root.position, person.active, person.down)
     }
-    return false
+    return this.witnessManager.hasWitnessInSight(origin, radius)
   }
 
   /**
-   * Alert civilians within 45m LOS of a crime: closest candidate(s) enter SHOCKED -> REPORTING (3.5s 911 call),
+   * Alert civilians within 45m LOS of a crime: closest candidate enters SHOCKED -> REPORTING (3.5s 911 call),
    * while bystanders flee. Returns true if at least one witness began reporting.
    */
   notifyCrimeToWitnesses(crimeOrigin: THREE.Vector3, severity = 1): boolean {
-    const rSq = WITNESS_RADIUS * WITNESS_RADIUS
-    const target = new THREE.Vector3(crimeOrigin.x, crimeOrigin.y + 1.2, crimeOrigin.z)
-    const from = new THREE.Vector3()
-    const candidates: { person: Pedestrian; distSq: number }[] = []
-
     for (const person of this.people) {
-      if (!person.active || person.down > 0 || person.witnessState === 'intimidated') continue
-      const dx = person.root.position.x - crimeOrigin.x
-      const dz = person.root.position.z - crimeOrigin.z
-      const distSq = dx * dx + dz * dz
-      if (distSq > rSq) continue
-      if (this.worldColliders.length > 0) {
-        from.set(person.root.position.x, person.root.position.y + 1.55, person.root.position.z)
-        if (!hasLineOfSight(from, target, this.worldColliders)) continue
-      }
-      candidates.push({ person, distSq })
+      this.witnessManager.syncActorPose(person.id, person.root.position, person.active, person.down)
     }
-
-    if (candidates.length === 0) return false
-    candidates.sort((a, b) => a.distSq - b.distSq)
-
-    let started = false
-    let reporters = this.people.filter(p => p.witnessState === 'reporting' || p.witnessState === 'shocked').length
-    for (let i = 0; i < candidates.length; i += 1) {
-      const { person } = candidates[i]
-      person.danger.copy(crimeOrigin)
-      if (reporters < 1 && person.witnessState !== 'reporting') {
-        person.witnessState = 'shocked'
-        person.shockTimer = 0.45
-        person.reportTimer = WITNESS_CALL_SECONDS
-        person.reportSeverity = Math.max(1, Math.min(6, Math.floor(severity)))
+    const result = this.witnessManager.notifyCrime(crimeOrigin, severity)
+    if (!result.started) return false
+    for (const person of this.people) {
+      const actor = this.witnessManager.getActor(person.id)
+      if (!actor) continue
+      if (actor.id === result.witnessId) {
+        person.witnessState = actor.state
+        person.shockTimer = actor.shockTimer
+        person.reportTimer = actor.reportTimer
+        person.reportSeverity = actor.reportSeverity
         person.reportOrigin.copy(crimeOrigin)
-        person.lostLosTimer = 0
-        reporters += 1
-        started = true
-      } else if (person.witnessState !== 'reporting') {
+        person.danger.copy(crimeOrigin)
+      } else if (result.fleeingIds.includes(actor.id)) {
         person.witnessState = 'fleeing'
+        person.danger.copy(crimeOrigin)
         person.flee = Math.max(person.flee, 6 + this.random() * 2)
       }
     }
-    return started
+    return true
   }
 
   /**
@@ -299,59 +299,27 @@ export class CityLife {
    * Cancels their 911 report before the 3.5s timer completes!
    */
   intimidateWitnesses(playerPos: THREE.Vector3, aimDir: THREE.Vector3, fired: boolean): boolean {
-    const dirLen = aimDir.length()
-    const normAim = dirLen > 1e-4 ? aimDir.clone().multiplyScalar(1 / dirLen) : new THREE.Vector3(0, 0, -1)
-    let intimidatedAny = false
-
     for (const person of this.people) {
-      if (!person.active || person.down > 0) continue
-      if (person.witnessState !== 'reporting' && person.witnessState !== 'shocked') continue
-
-      const toWitness = person.root.position.clone().sub(playerPos)
-      const dist = Math.hypot(toWitness.x, toWitness.z)
-      const closeRush = dist <= 5.5
-      const nearShot = fired && dist <= 26
-      let aimedAt = false
-      if (dist <= 22 && dist > 0.1) {
-        const dot = (toWitness.x * normAim.x + toWitness.z * normAim.z) / dist
-        if (dot >= 0.85) {
-          const from = new THREE.Vector3(playerPos.x, playerPos.y + 1.4, playerPos.z)
-          const to = new THREE.Vector3(person.root.position.x, person.root.position.y + 1.4, person.root.position.z)
-          aimedAt = this.worldColliders.length === 0 || hasLineOfSight(from, to, this.worldColliders)
-        }
-      }
-
-      if (closeRush || nearShot || aimedAt) {
-        person.witnessState = 'intimidated'
-        person.shockTimer = 0
-        person.reportTimer = 0
-        person.danger.copy(playerPos)
-        person.flee = 8
-        person.stagger = 1.2
-        this.pendingCancelReason = 'intimidated'
-        intimidatedAny = true
-      }
+      this.witnessManager.syncActorPose(person.id, person.root.position, person.active, person.down)
     }
-    return intimidatedAny
+    const intimidatedIds = this.witnessManager.intimidate(playerPos, aimDir, fired)
+    if (intimidatedIds.length === 0) return false
+    for (const id of intimidatedIds) {
+      const person = this.people.find(p => p.id === id)
+      if (!person) continue
+      person.witnessState = 'intimidated'
+      person.shockTimer = 0
+      person.reportTimer = 0
+      person.danger.copy(playerPos)
+      person.flee = 8
+      person.stagger = 1.2
+    }
+    return true
   }
 
   /** Retrieve live witness blips and consume any completed 3.5s report or tactical cancellation event. */
   consumeWitnessEvents(): WitnessEventState {
-    const blips: WitnessEventState['blips'] = []
-    for (const person of this.people) {
-      if (!person.active || person.down > 0) continue
-      if (person.witnessState === 'shocked' || person.witnessState === 'reporting') {
-        const progress = person.witnessState === 'reporting'
-          ? THREE.MathUtils.clamp(1 - person.reportTimer / WITNESS_CALL_SECONDS, 0, 1)
-          : 0
-        blips.push({
-          x: person.root.position.x,
-          z: person.root.position.z,
-          state: person.witnessState,
-          progress,
-        })
-      }
-    }
+    const blips = this.witnessManager.getActiveBlips().map(({ x, z, state, progress }) => ({ x, z, state, progress }))
     const completedReport = this.pendingCompletedReport
     const cancelledReason = this.pendingCancelReason
     this.pendingCompletedReport = null
@@ -608,12 +576,19 @@ export class CityLife {
           THREE.MathUtils.clamp(player.z + Math.sin(angle) * (18 + i * 2.5), -375, 375),
         )
         officer.down = 0
+        officer.hp = officer.maxHp
+        officer.armor = level >= 3 ? 45 : 15
         officer.impulse.set(0, 0, 0)
         officer.fire = 0.7 + i * 0.3
       }
       officer.active = active
       officer.root.visible = active
     }
+
+    for (const person of this.people) {
+      this.witnessManager.syncActorPose(person.id, person.root.position, person.active, person.down)
+    }
+    this.witnessManager.update(dt, player)
 
     for (const person of this.people) this.updatePerson(person, dt, player, navTarget, level)
     for (const officer of this.officers) if (officer.active) this.updatePerson(officer, dt, player, navTarget, level)
@@ -625,35 +600,34 @@ export class CityLife {
     this.lastWanted = level
   }
 
-  /** Frighten nearby bystanders and birds without changing game rules. */
-  startle(position: THREE.Vector3): void {
-    for (const person of this.people) {
-      const dx = person.root.position.x - position.x
-      const dz = person.root.position.z - position.z
-      if (dx * dx + dz * dz < 23 * 23 && Math.abs(position.y - 1) < 12) {
-        person.danger.copy(position)
-        if (person.witnessState === 'calm') person.witnessState = 'fleeing'
-        person.flee = Math.max(person.flee, 5 + this.random() * 2)
-      }
-    }
-    for (const bird of this.birds) {
-      const dx = bird.root.position.x - position.x
-      const dz = bird.root.position.z - position.z
-      if (dx * dx + dz * dz < 24 * 24) bird.scared = 3
-    }
+  /** Nearest person struck by a ray, clipped against solid world colliders. */
+  shoot(origin: THREE.Vector3, direction: THREE.Vector3, range: number, startleRadius = 23): boolean {
+    return this.shootBallistic(origin, direction, range, 40, 0.25, startleRadius).hit
   }
 
-  /** Nearest person struck by a ray, clipped against solid world colliders. */
-  shoot(origin: THREE.Vector3, direction: THREE.Vector3, range: number): boolean {
-    this.startle(origin)
+  /** Ballistic shot with localized head/torso/limb hitboxes, armor absorption, and stagger/knockdowns. */
+  shootBallistic(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    range: number,
+    baseDamage = 34,
+    armorPenetration = 0.25,
+    startleRadius = 23,
+  ): BallisticHitResult {
+    if (startleRadius > 0) this.startle(origin, startleRadius)
     const length = direction.length()
-    if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(length) || length < 1e-6) return false
+    if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(length) || length < 1e-6) {
+      return { hit: false, hitType: 'none', zone: 'torso', distance: 0, point: origin.clone(), critical: false, armorBroken: false, killed: false }
+    }
     const dir = direction.clone().multiplyScalar(1 / length)
     let nearest = this.worldColliders.length > 0 ? worldRayDistance(origin, dir, this.worldColliders, range) : range
     let target: Pedestrian | undefined
+    let hitZone: HitZone = 'torso'
+    const zones: Array<[number, number, HitZone]> = [[0.45, 0.32, 'limb'], [1.08, 0.48, 'torso'], [1.75, 0.31, 'head']]
+
     for (const person of [...this.people, ...this.officers]) {
-      if (!person.active) continue
-      for (const [height, radius] of [[0.45, 0.32], [1.08, 0.48], [1.75, 0.31]]) {
+      if (!person.active || person.down > 0) continue
+      for (const [height, radius, zone] of zones) {
         const x = person.root.position.x - origin.x
         const y = person.root.position.y + height - origin.y
         const z = person.root.position.z - origin.z
@@ -665,16 +639,102 @@ export class CityLife {
         if (projected + halfChord >= 0 && entry <= nearest) {
           nearest = entry
           target = person
+          hitZone = zone
         }
       }
     }
+
     const end = origin.clone().addScaledVector(dir, nearest)
     this.addTrace(origin, end, false)
-    if (!target) return false
-    this.hitPerson(target, origin, 5.8)
-    this.emit(end, '#ffd37b', 6, false)
-    this.startle(end)
-    return true
+    if (!target) {
+      return { hit: false, hitType: 'none', zone: 'torso', distance: nearest, point: end, critical: false, armorBroken: false, killed: false }
+    }
+
+    const mult = hitZone === 'head' ? 2.4 : hitZone === 'limb' ? 0.7 : 1.0
+    const falloff = nearest > 35 ? Math.max(0.55, 1 - (nearest - 35) / 80) : 1
+    let dmg = baseDamage * mult * falloff
+    let armorBroken = false
+
+    if (hitZone === 'torso' && target.armor > 0) {
+      const absorbed = Math.min(target.armor, dmg * (1 - armorPenetration))
+      target.armor = Math.max(0, target.armor - absorbed)
+      dmg -= absorbed * 0.7
+      armorBroken = target.armor <= 0
+      this.emit(end, '#6cdbff', 6, false)
+    } else {
+      this.emit(end, hitZone === 'head' ? '#ff5f6d' : '#ffd37b', hitZone === 'head' ? 8 : 5, false)
+    }
+
+    target.hp = Math.max(0, target.hp - dmg)
+    const killed = target.hp <= 0
+    this.hitPerson(target, origin, hitZone === 'limb' || killed ? 7.4 : 4.2)
+    if (killed) {
+      target.down = Math.max(target.down, target.police ? 12 : 9)
+      target.hp = target.maxHp
+    }
+    if (startleRadius > 0) this.startle(end, startleRadius)
+    return {
+      hit: true,
+      hitType: target.police ? 'cop' : 'person',
+      zone: hitZone,
+      distance: nearest,
+      point: end,
+      critical: hitZone === 'head',
+      armorBroken,
+      killed,
+    }
+  }
+
+  /** Radial explosive blast (grenades / launcher) damaging nearby people, police, and vehicles. */
+  explode(origin: THREE.Vector3, radius = 8, damage = 95): { peopleHit: number; copsDown: number } {
+    this.startle(origin, Math.max(28, radius * 4))
+    this.emit(origin, '#ff9848', 16, true)
+    this.emit(origin, '#fff2aa', 12, false)
+    let peopleHit = 0
+    let copsDown = 0
+    for (const person of [...this.people, ...this.officers]) {
+      if (!person.active) continue
+      const dx = person.root.position.x - origin.x
+      const dz = person.root.position.z - origin.z
+      const dist = Math.hypot(dx, dz)
+      if (dist > radius) continue
+      const ratio = 1 - dist / Math.max(1, radius)
+      person.hp = Math.max(0, person.hp - damage * ratio)
+      this.hitPerson(person, origin, 10 * Math.max(0.4, ratio))
+      person.down = Math.max(person.down, 4 + ratio * 6)
+      peopleHit += 1
+      if (person.police) copsDown += 1
+    }
+    for (const car of this.vehicles) {
+      if (!car.root.visible) continue
+      const dx = car.root.position.x - origin.x
+      const dz = car.root.position.z - origin.z
+      if (dx * dx + dz * dz <= (radius + 2.5) ** 2) {
+        car.crash = Math.max(car.crash, 4.5)
+        car.speed *= 0.15
+        this.emit(car.root.position.clone().add(new THREE.Vector3(0, 1.3, 0)), '#ff7e47', 6, true)
+      }
+    }
+    return { peopleHit, copsDown }
+  }
+
+  /** Frighten nearby bystanders and birds without changing game rules. */
+  startle(position: THREE.Vector3, radius = 23): void {
+    const rSq = radius * radius
+    for (const person of this.people) {
+      const dx = person.root.position.x - position.x
+      const dz = person.root.position.z - position.z
+      if (dx * dx + dz * dz < rSq && Math.abs(position.y - 1) < 12) {
+        person.danger.copy(position)
+        if (person.witnessState === 'calm') person.witnessState = 'fleeing'
+        person.flee = Math.max(person.flee, 5 + this.random() * 2)
+      }
+    }
+    for (const bird of this.birds) {
+      const dx = bird.root.position.x - position.x
+      const dz = bird.root.position.z - position.z
+      if (dx * dx + dz * dz < rSq) bird.scared = 3
+    }
   }
 
   /** Knock down nearby people and damage/brake nearby visual traffic. Returns people hit. */
@@ -915,7 +975,10 @@ export class CityLife {
     const active = !police || index === 0
     root.visible = active
     this.group.add(root)
+    const id = `${police ? 'cop' : 'ped'}-${index}`
+    const maxHp = police ? (swatStyle ? 120 : 85) : 55
     return {
+      id,
       root, model, leftLeg, rightLeg, leftArm, rightArm, witnessMarker, witnessPhone,
       police, active, side, streetX,
       direction: index % 4 < 2 ? 1 : -1,
@@ -928,6 +991,9 @@ export class CityLife {
       down: 0,
       hitLock: 0,
       fire: 0.8 + index * 0.3,
+      hp: maxHp,
+      maxHp,
+      armor: police && swatStyle ? 45 : police ? 15 : 0,
       witnessState: 'calm',
       shockTimer: 0,
       reportTimer: 0,
@@ -946,50 +1012,21 @@ export class CityLife {
     pos.addScaledVector(person.impulse, dt)
     person.impulse.multiplyScalar(Math.exp(-4.5 * dt))
 
-    // Witness state machine update for upright civilians
+    // Sync witness state from WitnessManager for upright civilians
     if (!person.police) {
-      if (person.down > 0) {
-        if (person.witnessState === 'reporting' || person.witnessState === 'shocked') {
-          person.witnessState = 'down'
-          person.reportTimer = 0
-          person.shockTimer = 0
-          this.pendingCancelReason = 'down'
-        }
-      } else if (person.witnessState === 'shocked') {
-        person.shockTimer -= dt
-        // Face player in shock
-        person.root.rotation.y = angleDamp(person.root.rotation.y, Math.atan2(realPlayer.x - pos.x, realPlayer.z - pos.z), 10, dt)
-        if (person.shockTimer <= 0) {
-          person.witnessState = 'reporting'
-          person.reportTimer = WITNESS_CALL_SECONDS
-        }
-      } else if (person.witnessState === 'reporting') {
-        const dist = Math.hypot(realPlayer.x - pos.x, realPlayer.z - pos.z)
-        const eyeFrom = new THREE.Vector3(pos.x, pos.y + 1.55, pos.z)
-        const eyeTo = new THREE.Vector3(realPlayer.x, realPlayer.y + 1.25, realPlayer.z)
-        const seesSuspect = dist <= WITNESS_RADIUS && (this.worldColliders.length === 0 || hasLineOfSight(eyeFrom, eyeTo, this.worldColliders))
-        if (!seesSuspect) {
-          person.lostLosTimer += dt
-        } else {
-          person.lostLosTimer = 0
-        }
-        if (dist > WITNESS_RADIUS || person.lostLosTimer > 1.4) {
-          person.witnessState = 'fleeing'
-          person.reportTimer = 0
-          person.flee = 5
-          this.pendingCancelReason = 'escaped'
-        } else {
-          person.reportTimer -= dt
-          person.root.rotation.y = angleDamp(person.root.rotation.y, Math.atan2(realPlayer.x - pos.x, realPlayer.z - pos.z), 7, dt)
-          if (person.reportTimer <= 0) {
-            this.pendingCompletedReport = { x: realPlayer.x, z: realPlayer.z, severity: person.reportSeverity }
-            person.witnessState = 'fleeing'
-            person.reportTimer = 0
-            person.flee = 7
+      const actor = this.witnessManager.getActor(person.id)
+      if (actor) {
+        person.witnessState = actor.state
+        person.shockTimer = actor.shockTimer
+        person.reportTimer = actor.reportTimer
+        if (person.down <= 0 && (actor.state === 'shocked' || actor.state === 'reporting')) {
+          person.root.rotation.y = angleDamp(person.root.rotation.y, Math.atan2(realPlayer.x - pos.x, realPlayer.z - pos.z), 8, dt)
+        } else if (actor.state === 'down' || actor.state === 'intimidated' || actor.state === 'fleeing') {
+          if (person.flee <= 0 && person.down <= 0) {
+            actor.state = 'calm'
+            person.witnessState = 'calm'
           }
         }
-      } else if (person.witnessState === 'down' || person.witnessState === 'intimidated' || person.witnessState === 'fleeing') {
-        if (person.flee <= 0 && person.down <= 0) person.witnessState = 'calm'
       }
 
       if (person.witnessMarker) {
@@ -1087,11 +1124,11 @@ export class CityLife {
       dx /= distance
       dz /= distance
     }
-    if (!person.police && (person.witnessState === 'reporting' || person.witnessState === 'shocked')) {
+    if (!person.police) {
+      this.witnessManager.knockDown(person.id)
       person.witnessState = 'down'
       person.reportTimer = 0
       person.shockTimer = 0
-      this.pendingCancelReason = 'down'
     }
     person.impulse.set(dx * Math.min(10, force), 0, dz * Math.min(10, force))
     person.down = Math.max(person.down, 1.6 + Math.min(2.4, force * 0.18))

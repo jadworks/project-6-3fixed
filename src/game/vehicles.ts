@@ -201,7 +201,7 @@ export class VehicleSystem {
     return vehicle.root.position.clone().addScaledVector(right, data.handling.width + 1.0)
   }
 
-  update(dt: number, input: VehicleInput, surfaceAt: (x: number, z: number) => VehicleSurface): void {
+  update(dt: number, input: VehicleInput, surfaceAt: (x: number, z: number) => VehicleSurface, handlingBonus = 0): void {
     if (!Number.isFinite(dt) || dt <= 0) return
     // Large tab-resume deltas are deliberately capped; substeps prevent tunnelling and
     // keep steering, drag, particles and impacts consistent at different frame rates.
@@ -229,7 +229,7 @@ export class VehicleSystem {
         if (!data) continue
         data.impactCooldown = Math.max(0, data.impactCooldown - step)
         const surface = surfaceAt(vehicle.root.position.x, vehicle.root.position.z)
-        this.stepVehicle(vehicle, data, step, vehicle === this.active ? control : NO_INPUT, surface)
+        this.stepVehicle(vehicle, data, step, vehicle === this.active ? control : NO_INPUT, surface, vehicle === this.active ? handlingBonus : 0)
         this.animateVehicle(vehicle, data, step, surface, vehicle === this.active ? control : NO_INPUT)
         this.emitDamage(vehicle, data, step)
       }
@@ -315,14 +315,15 @@ export class VehicleSystem {
     if (type === 'boat') this.boatSpawn = root.position.clone()
   }
 
-  private stepVehicle(v: Vehicle, data: VehicleParts, dt: number, input: VehicleInput, surface: VehicleSurface): void {
+  private stepVehicle(v: Vehicle, data: VehicleParts, dt: number, input: VehicleInput, surface: VehicleSurface, handlingBonus = 0): void {
     const h = data.handling
     const helicopter = v.type === 'helicopter'
     const boat = v.type === 'boat'
     const inWater = surface === 'water'
-    let power = 1
-    let speedLimit = h.maxSpeed
-    let grip = h.grip
+    const skillMult = 1 + Math.max(0, Math.min(0.45, handlingBonus))
+    let power = skillMult
+    let speedLimit = h.maxSpeed * (1 + Math.max(0, Math.min(0.18, handlingBonus * 0.4)))
+    let grip = h.grip * skillMult
     if (boat) {
       if (!inWater) { power = 0.18; speedLimit = 3; grip = 4 }
     } else if (!helicopter) {

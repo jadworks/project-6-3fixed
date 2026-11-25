@@ -66,6 +66,28 @@ service cloud.firestore {
         && (heat.lastKnownPos == null || isValidLkp(heat.lastKnownPos));
     }
 
+    function isValidRpgStats(stats) {
+      return stats is map
+        && stats.keys().hasAll(['respect', 'staminaSkill', 'muscle', 'fat', 'hunger', 'weaponSkill', 'drivingSkill'])
+        && stats.keys().hasOnly(['respect', 'staminaSkill', 'muscle', 'fat', 'hunger', 'weaponSkill', 'drivingSkill'])
+        && (stats.respect is int || stats.respect is float) && stats.respect >= 0 && stats.respect <= 100
+        && (stats.staminaSkill is int || stats.staminaSkill is float) && stats.staminaSkill >= 0 && stats.staminaSkill <= 100
+        && (stats.muscle is int || stats.muscle is float) && stats.muscle >= 0 && stats.muscle <= 100
+        && (stats.fat is int || stats.fat is float) && stats.fat >= 0 && stats.fat <= 100
+        && (stats.hunger is int || stats.hunger is float) && stats.hunger >= 0 && stats.hunger <= 100
+        && (stats.weaponSkill is int || stats.weaponSkill is float) && stats.weaponSkill >= 0 && stats.weaponSkill <= 100
+        && (stats.drivingSkill is int || stats.drivingSkill is float) && stats.drivingSkill >= 0 && stats.drivingSkill <= 100;
+    }
+
+    function isValidWeaponArsenal(arsenal) {
+      return arsenal is map
+        && arsenal.keys().hasAll(['equippedId', 'attachments', 'reserveByCategory'])
+        && arsenal.keys().hasOnly(['equippedId', 'attachments', 'reserveByCategory'])
+        && arsenal.equippedId is string && arsenal.equippedId.size() >= 1 && arsenal.equippedId.size() <= 24
+        && arsenal.attachments is map && arsenal.attachments.size() <= 24
+        && arsenal.reserveByCategory is map && arsenal.reserveByCategory.size() <= 10;
+    }
+
     function isValidPlayerSave(data) {
       return data.keys().hasAll([
           'uid', 'displayName', 'money', 'health', 'completed', 'upgrade',
@@ -74,7 +96,8 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'displayName', 'money', 'health', 'completed', 'upgrade',
           'muted', 'weather', 'robbedStores', 'seenIntro',
-          'position', 'inventory', 'heat', 'createdAt', 'updatedAt'
+          'position', 'inventory', 'heat', 'rpgStats', 'weaponArsenal', 'capturedTurfs',
+          'createdAt', 'updatedAt'
         ])
         && isValidId(data.uid)
         && data.uid == request.auth.uid
@@ -104,6 +127,9 @@ service cloud.firestore {
         && (!('position' in data) || isValidPosition(data.position))
         && (!('inventory' in data) || isValidInventory(data.inventory))
         && (!('heat' in data) || isValidHeat(data.heat))
+        && (!('rpgStats' in data) || isValidRpgStats(data.rpgStats))
+        && (!('weaponArsenal' in data) || isValidWeaponArsenal(data.weaponArsenal))
+        && (!('capturedTurfs' in data) || (data.capturedTurfs is list && data.capturedTurfs.size() <= 10 && (data.capturedTurfs.size() == 0 || (data.capturedTurfs[0] is string && data.capturedTurfs[0].size() >= 1 && data.capturedTurfs[0].size() <= 24))))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -160,7 +186,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'displayName', 'money', 'health', 'completed', 'upgrade',
           'muted', 'weather', 'robbedStores', 'seenIntro',
-          'position', 'inventory', 'heat', 'updatedAt'
+          'position', 'inventory', 'heat', 'rpgStats', 'weaponArsenal', 'capturedTurfs', 'updatedAt'
         ]);
       allow delete: if false;
     }

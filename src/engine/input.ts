@@ -4,13 +4,13 @@
  *
  * Call `endFrame()` once per rendered frame after gameplay consumed edge-triggered presses.
  */
-export type Action = 'jump' | 'sprint' | 'dash' | 'pause' | 'confirm' | 'back' | 'interact' | 'vehicle' | 'shoot' | 'crouch' | 'map' | 'reload' | 'weather'
+export type Action = 'jump' | 'sprint' | 'dash' | 'pause' | 'confirm' | 'back' | 'interact' | 'vehicle' | 'shoot' | 'crouch' | 'map' | 'reload' | 'weather' | 'wheel' | 'stats' | 'recruit' | 'attach' | 'aim'
 export type InputMethod = 'keyboard' | 'gamepad' | 'touch'
 
 const KEY_BINDINGS: Record<Action, string[]> = {
   jump: ['Space'],
   sprint: ['ShiftLeft', 'ShiftRight'],
-  dash: ['KeyF', 'KeyJ'],
+  dash: ['KeyF'],
   pause: ['Escape', 'KeyP'],
   confirm: ['Enter', 'NumpadEnter'],
   // Menus handle Escape/Backspace themselves via DOM keydown; `back` is the gamepad B button.
@@ -22,10 +22,15 @@ const KEY_BINDINGS: Record<Action, string[]> = {
   map: ['KeyM'],
   reload: ['KeyR'],
   weather: ['KeyT'],
+  wheel: ['Tab', 'KeyQ'],
+  stats: ['KeyJ'],
+  recruit: ['KeyG', 'KeyH'],
+  attach: ['KeyB'],
+  aim: [],
 }
 const MOVE_KEYS = { up: ['KeyW', 'ArrowUp'], down: ['KeyS', 'ArrowDown'], left: ['KeyA', 'ArrowLeft'], right: ['KeyD', 'ArrowRight'] }
-// Standard gamepad mapping: A=0, B=1, X=2, Y=3, LB=4, RB=5, RT=7, Start=9, L3=10.
-const PAD_BINDINGS: Record<Action, number[]> = { jump: [0], sprint: [4, 10], dash: [2, 5], pause: [9], confirm: [0], back: [1], interact: [3], vehicle: [2], shoot: [7], crouch: [1], map: [8], reload: [], weather: [] }
+// Standard gamepad mapping: A=0, B=1, X=2, Y=3, LB=4, RB=5, LT=6, RT=7, Start=9, L3=10, R3=11.
+const PAD_BINDINGS: Record<Action, number[]> = { jump: [0], sprint: [4, 10], dash: [2, 5], pause: [9], confirm: [0], back: [1], interact: [3], vehicle: [2], shoot: [7], crouch: [1], map: [8], reload: [], weather: [], wheel: [11], stats: [], recruit: [], attach: [], aim: [6] }
 
 export class Input {
   /** Movement intent in [-1, 1]: x = strafe right, y = forward. */
@@ -45,6 +50,8 @@ export class Input {
   private padPrev: boolean[] = []
   private padIndex = -1
   private padId = ''
+  private mouseFireHeld = false
+  private mouseAimHeld = false
   private listeners: Array<() => void> = []
 
   constructor(private readonly canvas: HTMLCanvasElement) {
@@ -59,18 +66,24 @@ export class Input {
       for (const [action, codes] of Object.entries(KEY_BINDINGS) as [Action, string[]][]) {
         if (codes.includes(e.code)) this.pressed_.add(action)
       }
-      // Keep the page from scrolling, but never block typing in text fields (leaderboard name).
+      // Keep the page from scrolling or tabbing away while in game controls.
       const typing = (e.target as HTMLElement | null)?.matches?.('input, textarea')
-      if (!typing && (e.code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault()
+      if (!typing && (e.code === 'Space' || e.code === 'Tab' || e.code.startsWith('Arrow'))) e.preventDefault()
     })
     on(window, 'keyup', e => this.keys.delete(e.code))
-    on(window, 'blur', () => this.keys.clear())
+    on(window, 'blur', () => { this.keys.clear(); this.mouseFireHeld = false; this.mouseAimHeld = false })
     on(window, 'gamepaddisconnected', e => {
       if (e.gamepad.index === this.padIndex) this.resetPad()
     })
     on(window, 'mousedown', e => {
-      // Fire only while the game canvas owns mouse look.
-      if (document.pointerLockElement === canvas && e.button === 0) this.pressed_.add('shoot')
+      if (document.pointerLockElement === canvas) {
+        if (e.button === 0) { this.pressed_.add('shoot'); this.mouseFireHeld = true }
+        if (e.button === 2) { this.pressed_.add('aim'); this.mouseAimHeld = true }
+      }
+    })
+    on(window, 'mouseup', e => {
+      if (e.button === 0) this.mouseFireHeld = false
+      if (e.button === 2) this.mouseAimHeld = false
     })
     on(window, 'mousemove', e => {
       if (document.pointerLockElement !== canvas) return
@@ -125,6 +138,8 @@ export class Input {
     for (const [action, codes] of Object.entries(KEY_BINDINGS) as [Action, string[]][]) {
       if (k(codes)) this.held_.add(action)
     }
+    if (this.mouseFireHeld) this.held_.add('shoot')
+    if (this.mouseAimHeld) this.held_.add('aim')
     for (const action of this.touchButtons) this.held_.add(action)
     if (this.touchMove.x !== 0 || this.touchMove.y !== 0) {
       x = this.touchMove.x

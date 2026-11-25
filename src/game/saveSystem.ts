@@ -1,3 +1,6 @@
+import type { SanAndreasStatsSave } from './sanAndreasRpg'
+import type { AttachmentId, WeaponCategoryId, WeaponSaveState } from './weapons'
+
 export type PlayerPosition = { x: number; y: number; z: number }
 export type PlayerInventory = { ammo: number; armor: number; weapon: string; sprintTier: number }
 export type PlayerHeatSave = {
@@ -19,6 +22,9 @@ export type CitySave = {
   position?: PlayerPosition
   inventory?: PlayerInventory
   heat?: PlayerHeatSave
+  rpgStats?: SanAndreasStatsSave
+  weaponArsenal?: WeaponSaveState
+  capturedTurfs?: string[]
 }
 
 const KEY = 'vicebay-nights.progress.v1'
@@ -72,6 +78,59 @@ export function sanitizeHeatSave(raw: unknown): PlayerHeatSave | undefined {
   }
 }
 
+export function sanitizeRpgStats(raw: unknown): SanAndreasStatsSave | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const s = raw as Record<string, unknown>
+  const round1 = (v: unknown, fb: number) => Math.round(clampNum(v, 0, 100, fb) * 10) / 10
+  return {
+    respect: round1(s.respect, 18),
+    staminaSkill: round1(s.staminaSkill, 28),
+    muscle: round1(s.muscle, 26),
+    fat: round1(s.fat, 14),
+    hunger: round1(s.hunger, 88),
+    weaponSkill: round1(s.weaponSkill, 20),
+    drivingSkill: round1(s.drivingSkill, 25),
+  }
+}
+
+const VALID_CATEGORIES = new Set<WeaponCategoryId>(['melee', 'handgun', 'smg', 'shotgun', 'rifle', 'precision', 'heavy', 'throwable'])
+const VALID_ATTACHMENTS = new Set<AttachmentId>(['suppressor', 'extMag', 'reflex'])
+
+export function sanitizeWeaponArsenal(raw: unknown): WeaponSaveState | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const w = raw as Record<string, unknown>
+  const equippedId = typeof w.equippedId === 'string' && /^[a-zA-Z0-9_-]{1,24}$/.test(w.equippedId) ? w.equippedId : 'pistol'
+  const attachments: Record<string, AttachmentId[]> = {}
+  if (w.attachments && typeof w.attachments === 'object') {
+    for (const [key, val] of Object.entries(w.attachments as Record<string, unknown>).slice(0, 24)) {
+      if (!/^[a-zA-Z0-9_-]{1,24}$/.test(key) || !Array.isArray(val)) continue
+      const list = val.filter((a): a is AttachmentId => typeof a === 'string' && VALID_ATTACHMENTS.has(a as AttachmentId))
+      if (list.length > 0) attachments[key] = list.slice(0, 3)
+    }
+  }
+  const reserveByCategory: Partial<Record<WeaponCategoryId, number>> = {}
+  if (w.reserveByCategory && typeof w.reserveByCategory === 'object') {
+    for (const [cat, amt] of Object.entries(w.reserveByCategory as Record<string, unknown>)) {
+      if (VALID_CATEGORIES.has(cat as WeaponCategoryId)) {
+        reserveByCategory[cat as WeaponCategoryId] = Math.floor(clampNum(amt, 0, 999, 0))
+      }
+    }
+  }
+  return { equippedId, attachments, reserveByCategory }
+}
+
+export function sanitizeCapturedTurfs(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item === 'string' && /^[a-zA-Z0-9_-]{1,24}$/.test(item) && !out.includes(item)) {
+      out.push(item)
+      if (out.length >= 10) break
+    }
+  }
+  return out
+}
+
 export function loadCitySave(): CitySave {
   try {
     const raw = localStorage.getItem(KEY)
@@ -93,9 +152,15 @@ export function loadCitySave(): CitySave {
     const position = sanitizePosition(value.position)
     const inventory = sanitizeInventory(value.inventory, upgrade)
     const heat = sanitizeHeatSave(value.heat)
+    const rpgStats = sanitizeRpgStats(value.rpgStats)
+    const weaponArsenal = sanitizeWeaponArsenal(value.weaponArsenal)
+    const capturedTurfs = sanitizeCapturedTurfs(value.capturedTurfs)
     if (position) result.position = position
     if (inventory) result.inventory = inventory
     if (heat) result.heat = heat
+    if (rpgStats) result.rpgStats = rpgStats
+    if (weaponArsenal) result.weaponArsenal = weaponArsenal
+    if (capturedTurfs) result.capturedTurfs = capturedTurfs
     return result
   } catch { return defaults() }
 }

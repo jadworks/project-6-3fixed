@@ -17,11 +17,16 @@ import {
   type PlayerHeatSave,
   type PlayerInventory,
   type PlayerPosition,
+  sanitizeCapturedTurfs,
   sanitizeHeatSave,
   sanitizeInventory,
   sanitizePosition,
+  sanitizeRpgStats,
+  sanitizeWeaponArsenal,
   saveCityProgress,
 } from '../game/saveSystem'
+import type { SanAndreasStatsSave } from '../game/sanAndreasRpg'
+import type { WeaponSaveState } from '../game/weapons'
 import { db, handleFirestoreError, OperationType } from './client'
 
 export type CloudLeaderboardRow = {
@@ -36,6 +41,9 @@ export type PlayerStateSnapshot = {
   position: PlayerPosition
   inventory: PlayerInventory
   heat: PlayerHeatSave
+  rpgStats?: SanAndreasStatsSave
+  weaponArsenal?: WeaponSaveState
+  capturedTurfs?: string[]
 }
 
 const VALID_ID = /^[a-zA-Z0-9_-]{1,128}$/
@@ -81,9 +89,15 @@ export function mergeCitySaves(local: CitySave, remote: Partial<CitySave>): City
   const position = sanitizePosition(remote.position) ?? sanitizePosition(local.position)
   const inventory = sanitizeInventory(remote.inventory, upgrade) ?? sanitizeInventory(local.inventory, upgrade)
   const heat = sanitizeHeatSave(remote.heat) ?? sanitizeHeatSave(local.heat)
+  const rpgStats = sanitizeRpgStats(remote.rpgStats) ?? sanitizeRpgStats(local.rpgStats)
+  const weaponArsenal = sanitizeWeaponArsenal(remote.weaponArsenal) ?? sanitizeWeaponArsenal(local.weaponArsenal)
+  const capturedTurfs = sanitizeCapturedTurfs([...(local.capturedTurfs ?? []), ...(remote.capturedTurfs ?? [])])
   if (position) merged.position = position
   if (inventory) merged.inventory = inventory
   if (heat) merged.heat = heat
+  if (rpgStats) merged.rpgStats = rpgStats
+  if (weaponArsenal) merged.weaponArsenal = weaponArsenal
+  if (capturedTurfs && capturedTurfs.length > 0) merged.capturedTurfs = capturedTurfs
   return merged
 }
 
@@ -109,9 +123,15 @@ export async function loadCloudPlayerSave(uid: string): Promise<Partial<CitySave
     const position = sanitizePosition(data.position)
     const inventory = sanitizeInventory(data.inventory, upgrade)
     const heat = sanitizeHeatSave(data.heat)
+    const rpgStats = sanitizeRpgStats(data.rpgStats)
+    const weaponArsenal = sanitizeWeaponArsenal(data.weaponArsenal)
+    const capturedTurfs = sanitizeCapturedTurfs(data.capturedTurfs)
     if (position) parsed.position = position
     if (inventory) parsed.inventory = inventory
     if (heat) parsed.heat = heat
+    if (rpgStats) parsed.rpgStats = rpgStats
+    if (weaponArsenal) parsed.weaponArsenal = weaponArsenal
+    if (capturedTurfs) parsed.capturedTurfs = capturedTurfs
     return parsed
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path)
@@ -126,6 +146,9 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
   const position = sanitizePosition(save.position)
   const inventory = sanitizeInventory(save.inventory, upgrade)
   const heat = sanitizeHeatSave(save.heat)
+  const rpgStats = sanitizeRpgStats(save.rpgStats)
+  const weaponArsenal = sanitizeWeaponArsenal(save.weaponArsenal)
+  const capturedTurfs = sanitizeCapturedTurfs(save.capturedTurfs)
   const payload: Record<string, unknown> = {
     uid: user.uid,
     displayName: sanitizeDisplayName(user.displayName, 60),
@@ -141,6 +164,9 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
   if (position) payload.position = position
   if (inventory) payload.inventory = inventory
   if (heat) payload.heat = heat
+  if (rpgStats) payload.rpgStats = rpgStats
+  if (weaponArsenal) payload.weaponArsenal = weaponArsenal
+  if (capturedTurfs) payload.capturedTurfs = capturedTurfs
 
   let exists = false
   try {
@@ -166,6 +192,9 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
       if (position) updatePayload.position = position
       if (inventory) updatePayload.inventory = inventory
       if (heat) updatePayload.heat = heat
+      if (rpgStats) updatePayload.rpgStats = rpgStats
+      if (weaponArsenal) updatePayload.weaponArsenal = weaponArsenal
+      if (capturedTurfs) updatePayload.capturedTurfs = capturedTurfs
       await updateDoc(ref, updatePayload)
     } else {
       await setDoc(ref, {
@@ -180,8 +209,8 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
 }
 
 /**
- * Persist the player's position, inventory, and heat level to Firestore whenever
- * the game state changes, falling back cleanly to localStorage if offline or signed out.
+ * Persist the player's position, inventory, heat, RPG stats, arsenal, and captured turfs
+ * to Firestore whenever game state changes, falling back cleanly to localStorage if offline or signed out.
  */
 export async function persistPlayerState(
   user: User | null,
@@ -191,12 +220,18 @@ export async function persistPlayerState(
   const cleanPos = sanitizePosition(state.position)
   const cleanInv = sanitizeInventory(state.inventory, save.upgrade)
   const cleanHeat = sanitizeHeatSave(state.heat)
+  const cleanRpg = sanitizeRpgStats(state.rpgStats)
+  const cleanArsenal = sanitizeWeaponArsenal(state.weaponArsenal)
+  const cleanTurfs = sanitizeCapturedTurfs(state.capturedTurfs)
   if (cleanPos) save.position = cleanPos
   if (cleanInv) {
     save.inventory = cleanInv
     save.upgrade = cleanInv.sprintTier
   }
   if (cleanHeat) save.heat = cleanHeat
+  if (cleanRpg) save.rpgStats = cleanRpg
+  if (cleanArsenal) save.weaponArsenal = cleanArsenal
+  if (cleanTurfs) save.capturedTurfs = cleanTurfs
 
   saveCityProgress(save)
 

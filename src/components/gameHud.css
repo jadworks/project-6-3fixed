@@ -281,7 +281,7 @@
 .vbn-wanted-segment.is-lockdown-star.is-lit svg { fill: #ff475e; stroke: #ffd369; filter: drop-shadow(0 0 9px rgba(255,71,94,.95)); }
 .vbn-stars.is-pursuit .is-lit { animation: vbnPursuit .52s ease-in-out infinite; }
 .vbn-stars.is-evading .is-lit svg { fill: rgba(110,148,186,.26); stroke: #8fb8d6; filter: none; }
-.vbn-stars.is-evading .is-lit { animation: vbnEvade 1.25s ease-in-out infinite; }
+.vbn-stars.is-evading .is-lit { opacity: var(--evade-fade, .85); animation: vbnEvade 1.25s ease-in-out infinite; }
 .vbn-stars.is-witness { border-bottom: 2px solid var(--vbn-yellow); }
 .vbn-stars.is-lockdown { padding-right: 2px; }
 @keyframes vbnPursuit {
@@ -289,8 +289,8 @@
   50% { transform: scale(1.12); filter: drop-shadow(0 0 12px rgba(255,75,105,.95)); }
 }
 @keyframes vbnEvade {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .35; }
+  0%, 100% { opacity: var(--evade-fade, 1); }
+  50% { opacity: .24; }
 }
 .vbn-heat-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 9px; margin: -6px 0 10px; }
 .vbn-heat-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -353,3 +353,93 @@
 .vbn-cut-track { max-width: min(820px, 92vw); height: 3px; margin: 0 auto; background: rgba(255,255,255,.14); overflow: hidden; }
 .vbn-cut-track i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--vbn-pink), var(--vbn-cyan)); }
 
+/* Stamina, Squad, and Turf War HUD additions */
+.vbn-stamina-track { display: block; height: 3px; margin-top: 3px; background: rgba(255,255,255,.14); }
+.vbn-stamina-track i { display: block; width: 100%; height: 100%; background: var(--vbn-cyan); transition: width .15s linear; }
+.vbn-ammo { min-width: 104px; max-width: 150px; }
+.vbn-ammo small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vbn-squad-pill { color: #9eb3b8; }
+.vbn-squad-pill.is-active { color: #4af3e5; font-weight: 900; }
+.vbn-turf-banner { position: absolute; top: 68px; left: 50%; z-index: 4; display: flex; align-items: center; gap: 12px; padding: 7px 15px; border: 1px solid rgba(255,105,130,.55); border-left: 3px solid var(--vbn-pink); background: rgba(11,14,22,.92); transform: translateX(-50%); }
+.vbn-turf-banner strong { font-size: 11px; font-weight: 900; letter-spacing: .14em; color: #fff; }
+.vbn-turf-banner span { font-size: 10px; font-weight: 900; letter-spacing: .12em; color: var(--vbn-yellow); }
+
+/* Gang Territory Minimap / Map Overlays */
+.vbn-map-zones { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+.vbn-map-zone { fill-opacity: .16; stroke-opacity: .55; stroke-width: .7 !important; }
+.vbn-map-zone.is-war { fill-opacity: .3; stroke-dasharray: 2 2; animation: vbnEvade .7s ease-in-out infinite; }
+.vbn-map-homie, .vbn-map-rival { position: absolute; width: 5px; height: 5px; border-radius: 50%; transform: translate(-50%,-50%); z-index: 3; pointer-events: none; }
+.vbn-map-homie { background: #4af3e5; border: 1px solid #08131a; opacity: .75; }
+.vbn-map-homie.is-recruited { width: 7px; height: 7px; border-color: #fff; opacity: 1; box-shadow: 0 0 6px #4af3e5; }
+.vbn-map-rival { border: 1px solid #141219; }
+
+/* GTA 6 Dynamic Recoil Reticle & Hitmarkers */
+.vbn-reticle { --ret-gap: 9px; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; transform: translate(-50%,-50%); pointer-events: none; z-index: 3; }
+.vbn-ret-dot { position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; border-radius: 50%; background: rgba(255,255,255,.94); box-shadow: 0 0 4px rgba(0,0,0,.85); transform: translate(-50%,-50%); }
+.vbn-ret-prong { position: absolute; left: 50%; top: 50%; background: rgba(255,255,255,.9); box-shadow: 0 0 3px rgba(0,0,0,.8); transition: transform .05s linear; }
+.vbn-ret-prong.is-top { width: 2px; height: 8px; transform: translate(-50%, calc(-100% - var(--ret-gap))); }
+.vbn-ret-prong.is-bottom { width: 2px; height: 8px; transform: translate(-50%, var(--ret-gap)); }
+.vbn-ret-prong.is-left { width: 8px; height: 2px; transform: translate(calc(-100% - var(--ret-gap)), -50%); }
+.vbn-ret-prong.is-right { width: 8px; height: 2px; transform: translate(var(--ret-gap), -50%); }
+.vbn-ret-circle { display: none; position: absolute; left: 50%; top: 50%; width: calc(var(--ret-gap) * 2.5); height: calc(var(--ret-gap) * 2.5); border: 1.5px solid rgba(255,255,255,.78); border-radius: 50%; transform: translate(-50%,-50%); }
+.vbn-reticle.is-shotgun .vbn-ret-circle { display: block; }
+.vbn-reticle.is-shotgun .vbn-ret-prong { opacity: .4; }
+.vbn-reticle.is-melee .vbn-ret-prong { display: none; }
+.vbn-reticle.is-aiming .vbn-ret-prong { background: var(--vbn-cyan); }
+.vbn-reticle.is-precision.is-aiming .vbn-ret-circle { display: block; width: 42px; height: 42px; border-color: rgba(119,230,231,.85); }
+.vbn-hitmarker { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%,-50%); }
+.vbn-hitmarker::before, .vbn-hitmarker::after { content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 18px; background: #fff; box-shadow: 0 0 6px rgba(0,0,0,.85); }
+.vbn-hitmarker::before { transform: translate(-50%,-50%) rotate(45deg); }
+.vbn-hitmarker::after { transform: translate(-50%,-50%) rotate(-45deg); }
+.vbn-hitmarker[data-kind="critical"]::before, .vbn-hitmarker[data-kind="critical"]::after { background: #ff475e; box-shadow: 0 0 10px #f6d66d; }
+.vbn-hitmarker[data-kind="armor"]::before, .vbn-hitmarker[data-kind="armor"]::after { background: var(--vbn-cyan); }
+.vbn-reload-pill { position: absolute; left: 50%; top: 26px; width: 46px; height: 4px; background: rgba(10,16,24,.86); border: 1px solid rgba(255,255,255,.25); transform: translateX(-50%); }
+.vbn-reload-pill i { display: block; height: 100%; width: 0%; background: var(--vbn-yellow); }
+
+/* 25% Tactical Slow-Mo Vignette (no backdrop-filter for WebGL perf) */
+.vbn-slowmo-vignette { position: absolute; inset: 0; z-index: 4; pointer-events: none; background: radial-gradient(circle at center, rgba(16,24,36,.18) 28%, rgba(5,9,16,.78) 100%); }
+
+/* 8-Sector Radial Weapon Wheel */
+.vbn-wheel-overlay { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; pointer-events: auto; }
+.vbn-wheel-stage { width: min(500px, 92vw); padding: 14px 18px; border: 1px solid rgba(119,230,231,.35); background: rgba(9,14,22,.92); box-shadow: 0 18px 50px rgba(0,0,0,.65); }
+.vbn-wheel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.vbn-wheel-header span { font-size: 9px; font-weight: 900; letter-spacing: .16em; color: var(--vbn-cyan); }
+.vbn-wheel-header strong { font-size: 13px; font-weight: 900; letter-spacing: .14em; }
+.vbn-wheel-close { padding: 4px 8px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.06); font-size: 10px; font-weight: 900; }
+.vbn-wheel-body { position: relative; width: min(420px, 84vw); aspect-ratio: 1; margin: 0 auto; }
+.vbn-wheel-svg { width: 100%; height: 100%; stroke: none !important; }
+.vbn-wheel-sector { cursor: pointer; pointer-events: auto; }
+.vbn-wheel-sector path { fill: rgba(20,30,44,.92); stroke: rgba(119,230,231,.32); stroke-width: 1.4; transition: fill .12s, stroke .12s; }
+.vbn-wheel-sector:hover path { fill: rgba(34,50,70,.95); stroke: var(--vbn-cyan); }
+.vbn-wheel-sector.is-active path { fill: rgba(255,75,152,.28); stroke: var(--vbn-pink); stroke-width: 2.2; }
+.vbn-wheel-num { fill: var(--vbn-yellow); font-size: 11px; font-weight: 900; text-anchor: middle; pointer-events: none; }
+.vbn-wheel-label { fill: #f4f1ea; font-size: 10px; font-weight: 900; letter-spacing: .08em; text-anchor: middle; pointer-events: none; }
+.vbn-wheel-core { position: absolute; left: 50%; top: 50%; width: 162px; transform: translate(-50%,-50%); text-align: center; pointer-events: auto; }
+.vbn-wheel-core small { display: block; color: var(--vbn-cyan); font-size: 8px; font-weight: 900; letter-spacing: .15em; }
+.vbn-wheel-core strong { display: block; margin: 2px 0; font-size: 12px; font-weight: 900; color: #fff; }
+.vbn-wheel-ammo { font-size: 10px; font-weight: 800; color: var(--vbn-yellow); margin-bottom: 6px; }
+.vbn-wheel-bars { display: flex; flex-direction: column; gap: 3px; margin-bottom: 7px; }
+.vbn-wheel-bars > div { display: flex; align-items: center; gap: 6px; font-size: 8px; font-weight: 900; color: #b5c3c8; }
+.vbn-wheel-bars > div span { width: 24px; text-align: left; }
+.vbn-wheel-bars > div i { flex: 1; height: 4px; background: rgba(255,255,255,.15); overflow: hidden; }
+.vbn-wheel-bars > div b { display: block; height: 100%; background: var(--vbn-cyan); }
+.vbn-wheel-variants, .vbn-wheel-atts { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-bottom: 5px; }
+.vbn-wheel-chip, .vbn-wheel-att { padding: 3px 6px; border: 1px solid rgba(255,255,255,.22); background: rgba(16,24,36,.92); font-size: 8px !important; font-weight: 900 !important; letter-spacing: .06em; }
+.vbn-wheel-chip.is-selected { border-color: var(--vbn-pink); background: rgba(255,75,152,.25); color: #fff; }
+.vbn-wheel-att.is-on { border-color: var(--vbn-cyan); background: rgba(119,230,231,.22); color: var(--vbn-cyan); }
+.vbn-wheel-noatt { font-size: 8px; color: #83949c; letter-spacing: .08em; }
+.vbn-wheel-hint { margin: 4px 0 0; font-size: 7.5px; color: #9fb0b7; letter-spacing: .08em; line-height: 1.3; }
+
+/* GTA: San Andreas RPG Stats Overlay (no backdrop-filter for WebGL perf) */
+.vbn-sa-stats { position: absolute; left: 3%; top: 158px; z-index: 5; width: min(296px, 86vw); padding: 13px 15px; border: 1px solid rgba(119,230,231,.38); border-left: 3px solid var(--vbn-yellow); background: rgba(9,14,22,.94); box-shadow: 0 12px 32px rgba(0,0,0,.55); pointer-events: auto; }
+.vbn-sa-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.vbn-sa-head small { display: block; font-size: 8px; font-weight: 900; letter-spacing: .16em; color: var(--vbn-cyan); }
+.vbn-sa-head strong { font-size: 13px; font-weight: 900; letter-spacing: .1em; }
+.vbn-sa-badges { display: flex; gap: 6px; margin-bottom: 10px; }
+.vbn-sa-badges span { flex: 1; padding: 4px 6px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.04); font-size: 8.5px; font-weight: 900; letter-spacing: .1em; text-align: center; color: var(--vbn-yellow); }
+.vbn-sa-bars { display: flex; flex-direction: column; gap: 7px; }
+.vbn-sa-label { display: flex; justify-content: space-between; font-size: 9px; font-weight: 900; letter-spacing: .12em; margin-bottom: 2px; color: #dbe6e4; }
+.vbn-sa-label b { color: var(--vbn-cyan); }
+.vbn-sa-track { height: 6px; background: rgba(255,255,255,.15); overflow: hidden; }
+.vbn-sa-track i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--vbn-cyan), #62f4b8); transition: width .18s ease; }
+.vbn-sa-foot { margin: 10px 0 0; font-size: 8px; font-weight: 800; letter-spacing: .1em; color: #9db0b5; line-height: 1.4; }

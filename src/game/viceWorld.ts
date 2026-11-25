@@ -14,6 +14,8 @@ export type WorldCollider = {
 }
 export type Safehouse = { name: string; position: THREE.Vector3; radius: number }
 export type Store = { id: string; name: string; position: THREE.Vector3; radius: number; reward: number }
+export type GymStation = { id: string; name: string; kind: 'bench' | 'bag'; position: THREE.Vector3; radius: number }
+export type FoodStand = { id: string; name: string; position: THREE.Vector3; radius: number; price: number; mealSize: number }
 export type WorldRamp = { position: THREE.Vector3; width: number; length: number; rise: number; rotationY: number }
 
 type BatchItem = { matrix: THREE.Matrix4; color: THREE.Color }
@@ -116,6 +118,8 @@ export class ViceWorld {
   public readonly colliders: WorldCollider[] = []
   public readonly safehouses: Safehouse[] = []
   public readonly stores: Store[] = []
+  public readonly gyms: GymStation[] = []
+  public readonly foodStands: FoodStand[] = []
   public readonly ramps: WorldRamp[] = []
 
   private readonly sun = new THREE.DirectionalLight('#fff0d0', 2.15)
@@ -196,6 +200,7 @@ export class ViceWorld {
     this.makeWetlands()
     this.makeStreetFurniture()
     this.makeRampsAndSafehouses()
+    this.makeLifestyleStations()
     for (const batch of [this.smallBoxes, this.buildings, this.trims, this.pinkLights, this.cyanLights, this.trunks, this.fronds, this.foliage]) {
       batch.finish(this.scene, this.chunks)
     }
@@ -668,6 +673,56 @@ export class ViceWorld {
       marker.rotation.x = -Math.PI / 2
       marker.position.copy(home.position).setY(0.15)
       this.scene.add(marker)
+    }
+  }
+
+  private makeLifestyleStations(): void {
+    // 2 Outdoor San Andreas Gym Stations (Beach Muscle Pit & Downtown Heavy Bag)
+    const gymSpecs: GymStation[] = [
+      { id: 'beach-gym', name: 'Muscle Beach Bench Rack', kind: 'bench', position: new THREE.Vector3(24, 0, 34), radius: 3.4 },
+      { id: 'downtown-gym', name: 'Downtown Boxing Bag', kind: 'bag', position: new THREE.Vector3(-42, 0, -72), radius: 3.4 },
+    ]
+    for (const gym of gymSpecs) {
+      this.gyms.push(gym)
+      const { x, z } = gym.position
+      // Rubber mat base + equipment silhouette (3-6 distinct parts)
+      this.smallBoxes.add(x, 0.06, z, 4.4, 0.12, 3.6, '#232830')
+      if (gym.kind === 'bench') {
+        this.trims.add(x, 0.42, z, 0.7, 0.22, 1.85, '#b83c48')
+        this.trims.add(x - 0.65, 0.85, z - 0.55, 0.14, 1.4, 0.14, '#7d8a92')
+        this.trims.add(x + 0.65, 0.85, z - 0.55, 0.14, 1.4, 0.14, '#7d8a92')
+        this.trims.add(x, 1.4, z - 0.55, 2.3, 0.09, 0.09, '#d6dee4')
+        this.smallBoxes.add(x - 1.05, 1.4, z - 0.55, 0.18, 0.6, 0.6, '#1f2328')
+        this.smallBoxes.add(x + 1.05, 1.4, z - 0.55, 0.18, 0.6, 0.6, '#1f2328')
+      } else {
+        this.trims.add(x - 0.9, 1.5, z, 0.16, 3.0, 0.16, '#69747d')
+        this.trims.add(x - 0.45, 2.9, z, 1.1, 0.16, 0.16, '#69747d')
+        this.smallBoxes.add(x, 1.75, z, 0.56, 1.35, 0.56, '#c83f3f')
+      }
+      this.cyanLights.add(x, 0.15, z + 1.7, 3.4, 0.1, 0.12, '#77e6e7')
+      const ring = new THREE.Mesh(new THREE.RingGeometry(1.3, 1.65, 28), new THREE.MeshBasicMaterial({ color: '#f6d66d', side: THREE.DoubleSide, transparent: true, opacity: 0.72 }))
+      ring.rotation.x = -Math.PI / 2
+      ring.position.set(x, 0.15, z)
+      this.scene.add(ring)
+    }
+
+    // 2 Street Food Vendors (Burger Bay & Taco Tropics)
+    const foodSpecs: FoodStand[] = [
+      { id: 'burger-bay', name: 'Burger Bay', position: new THREE.Vector3(16, 0, -24), radius: 3.8, price: 15, mealSize: 55 },
+      { id: 'taco-tropics', name: 'Taco Tropics', position: new THREE.Vector3(-76, 0, 26), radius: 3.8, price: 12, mealSize: 45 },
+    ]
+    for (const stand of foodSpecs) {
+      this.foodStands.push(stand)
+      const { x, z } = stand.position
+      this.smallBoxes.add(x, 1.4, z, 3.8, 2.8, 2.6, '#f2e4cc')
+      this.trims.add(x, 2.9, z, 4.2, 0.35, 3.0, '#ff4b98')
+      this.trims.add(x, 0.65, z + 1.45, 3.6, 0.95, 0.35, '#3b4a56')
+      this.pinkLights.add(x, 2.55, z + 1.42, 3.4, 0.18, 0.14, '#ff73b8')
+      this.sign(stand.name.toUpperCase(), x, 3.45, z + 1.36, 3.4, 0)
+      const ring = new THREE.Mesh(new THREE.RingGeometry(1.3, 1.65, 28), new THREE.MeshBasicMaterial({ color: '#77e6e7', side: THREE.DoubleSide, transparent: true, opacity: 0.72 }))
+      ring.rotation.x = -Math.PI / 2
+      ring.position.set(x, 0.15, z + 2.2)
+      this.scene.add(ring)
     }
   }
 

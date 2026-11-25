@@ -102,18 +102,101 @@ export class ViceAudio {
   }
 
   shoot(): void {
-    if (!this.context || !this.master) return
-    const c = this.context, t = c.currentTime, n = Math.floor(c.sampleRate * .13), data = c.createBuffer(1, n, c.sampleRate)
+    this.shootWeapon('handgun', false)
+  }
+
+  shootWeapon(category: string, suppressed: boolean): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime
+    if (suppressed) {
+      const n = Math.floor(c.sampleRate * 0.06)
+      const data = c.createBuffer(1, n, c.sampleRate)
+      const ch = data.getChannelData(0)
+      for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3.2)
+      const src = c.createBufferSource(), filter = c.createBiquadFilter(), gain = c.createGain()
+      src.buffer = data; filter.type = 'bandpass'; filter.frequency.setValueAtTime(1400, t); filter.Q.setValueAtTime(2.2, t)
+      gain.gain.setValueAtTime(0.32, t); gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06)
+      src.connect(filter).connect(gain).connect(this.master); src.start(t)
+      this.note(165, 0.05, 0.09)
+      return
+    }
+    const dur = category === 'shotgun' || category === 'precision' || category === 'heavy' ? 0.22 : category === 'smg' ? 0.09 : 0.14
+    const n = Math.floor(c.sampleRate * dur), data = c.createBuffer(1, n, c.sampleRate)
     const channel = data.getChannelData(0)
-    for (let i = 0; i < n; i++) channel[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 1.8)
+    for (let i = 0; i < n; i++) channel[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, category === 'shotgun' ? 1.3 : 1.9)
     const src = c.createBufferSource(), filter = c.createBiquadFilter(), gain = c.createGain()
-    src.buffer = data; filter.type = 'lowpass'; filter.frequency.setValueAtTime(1800, t); filter.frequency.exponentialRampToValueAtTime(480, t + .12)
-    gain.gain.setValueAtTime(.7, t); gain.gain.exponentialRampToValueAtTime(.001, t + .13)
+    src.buffer = data; filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(category === 'smg' ? 2400 : category === 'precision' ? 2600 : 1850, t)
+    filter.frequency.exponentialRampToValueAtTime(category === 'shotgun' ? 260 : 460, t + dur)
+    gain.gain.setValueAtTime(category === 'shotgun' ? 0.92 : category === 'precision' ? 0.85 : 0.68, t)
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur)
     src.connect(filter).connect(gain).connect(this.master); src.start(t)
+
     const boom = c.createOscillator(), boomGain = c.createGain()
-    boom.type = 'sine'; boom.frequency.setValueAtTime(115, t); boom.frequency.exponentialRampToValueAtTime(48, t + .16)
-    boomGain.gain.setValueAtTime(.2, t); boomGain.gain.exponentialRampToValueAtTime(.001, t + .16)
-    boom.connect(boomGain).connect(this.master); boom.start(t); boom.stop(t + .17)
+    const lowHz = category === 'shotgun' || category === 'heavy' ? 88 : category === 'rifle' ? 132 : category === 'smg' ? 155 : 115
+    boom.type = 'sine'; boom.frequency.setValueAtTime(lowHz, t); boom.frequency.exponentialRampToValueAtTime(42, t + dur)
+    boomGain.gain.setValueAtTime(category === 'shotgun' ? 0.3 : 0.2, t); boomGain.gain.exponentialRampToValueAtTime(0.001, t + dur)
+    boom.connect(boomGain).connect(this.master); boom.start(t); boom.stop(t + dur + 0.01)
+  }
+
+  meleeSwing(): void {
+    if (this.muted) return
+    this.note(190, 0.08, 0.09)
+  }
+
+  hitmarker(kind: 'normal' | 'critical' | 'armor' = 'normal'): void {
+    if (this.muted) return
+    if (kind === 'critical') {
+      this.note(1480, 0.055, 0.08)
+      window.setTimeout(() => this.note(1880, 0.06, 0.075), 40)
+    } else if (kind === 'armor') {
+      this.note(920, 0.05, 0.075)
+    } else {
+      this.note(1180, 0.04, 0.06)
+    }
+  }
+
+  reload(): void {
+    if (this.muted) return
+    this.note(420, 0.05, 0.06)
+    window.setTimeout(() => this.note(680, 0.06, 0.06), 110)
+  }
+
+  dryFire(): void {
+    if (this.muted) return
+    this.note(980, 0.03, 0.05)
+  }
+
+  explosion(): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime, dur = 0.45
+    const n = Math.floor(c.sampleRate * dur), data = c.createBuffer(1, n, c.sampleRate)
+    const ch = data.getChannelData(0)
+    for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 1.15)
+    const src = c.createBufferSource(), lp = c.createBiquadFilter(), g = c.createGain()
+    src.buffer = data; lp.type = 'lowpass'; lp.frequency.setValueAtTime(750, t); lp.frequency.exponentialRampToValueAtTime(90, t + dur)
+    g.gain.setValueAtTime(0.95, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+    src.connect(lp).connect(g).connect(this.master); src.start(t)
+    this.note(62, 0.42, 0.34)
+  }
+
+  gymRep(): void {
+    if (this.muted) return
+    this.note(220, 0.08, 0.08)
+    window.setTimeout(() => this.note(330, 0.12, 0.08), 85)
+  }
+
+  recruitWhistle(): void {
+    if (this.muted) return
+    this.note(980, 0.09, 0.065)
+    window.setTimeout(() => this.note(1240, 0.11, 0.065), 80)
+  }
+
+  turfCaptured(): void {
+    if (this.muted) return
+    this.note(392, 0.14, 0.09)
+    window.setTimeout(() => this.note(493.88, 0.14, 0.09), 110)
+    window.setTimeout(() => this.note(587.33, 0.25, 0.11), 220)
   }
 
   robbery(): void {

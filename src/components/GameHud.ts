@@ -2,6 +2,9 @@ import './gameHud.css'
 import type { CutsceneHudState } from '../game/cutscene'
 import type { HeatHudState } from '../game/heatSystem'
 import type { PoliceRadarUnit } from '../game/cityLife'
+import type { GangMapZone } from '../game/gangTurf'
+import { WantedHUD } from './WantedHUD'
+import { CombatHud, type CombatHudCallbacks, type CombatHudState } from './CombatHud'
 
 export type HudState = {
   money: number
@@ -24,6 +27,15 @@ export type HudState = {
   police?: { x: number; z: number; kind: 'cop' | 'heli' }[]
   policeRadars?: PoliceRadarUnit[]
   nearestPursuerDist?: number
+  weaponName?: string
+  weaponAmmoText?: string
+  stamina?: number
+  homies?: number
+  maxHomies?: number
+  turfWar?: { zoneName: string; wave: number; totalWaves: number; remaining: number } | null
+  gangZones?: GangMapZone[]
+  homieBlips?: { x: number; z: number; recruited: boolean }[]
+  rivalBlips?: { x: number; z: number; color: string }[]
 }
 
 export type HudCallbacks = {
@@ -39,6 +51,7 @@ export type HudCallbacks = {
   skipCutscene?: () => void
   replayIntro?: () => void
   auth?: () => void
+  combat?: CombatHudCallbacks
 }
 
 type View = 'title' | 'game' | 'pause' | 'map' | 'controls' | 'missions' | 'leaderboard' | 'cutscene'
@@ -51,7 +64,6 @@ const icons = {
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
   target: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>',
   heart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20S4 15 4 9.5a4.5 4.5 0 0 1 8-2.8 4.5 4.5 0 0 1 8 2.8C20 15 12 20 12 20Z"/></svg>',
-  star: '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.4 14.95 8.5 21.7 9.45 16.8 14.2 18 20.9 12 17.7 6 20.9 7.2 14.2 2.3 9.45 9.05 8.5 12 2.4"/></svg>',
 }
 
 const mapArt = (): string => `
@@ -68,12 +80,15 @@ const mapArt = (): string => `
     <path d="M236 19v15m-7-7h15" stroke="#e7f6ee" stroke-width="1.3"/>
     <text x="232" y="16" fill="#e7f6ee" font-size="9" font-family="sans-serif" font-weight="bold">N</text>
   </svg>
+  <svg class="vbn-map-zones" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
   <svg class="vbn-map-cones" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
   <span class="vbn-map-marker vbn-marker-beach" title="Vice Beach"><i></i></span>
   <span class="vbn-map-marker vbn-marker-downtown" title="Downtown"><i></i></span>
   <span class="vbn-map-marker vbn-marker-port" title="Port Vice"><i></i></span>
   <span class="vbn-map-marker vbn-marker-wetlands" title="The Wetlands"><i></i></span>
   <span class="vbn-map-lkp" title="Police search zone" hidden></span>
+  <span class="vbn-map-homies"></span>
+  <span class="vbn-map-rivals"></span>
   <span class="vbn-map-witnesses"></span>
   <span class="vbn-map-police"></span>
   <span class="vbn-map-homes"></span>
@@ -86,12 +101,14 @@ const controls = [
   ['SHIFT', 'Sprint'],
   ['SPACE', 'Jump / handbrake'],
   ['F', 'Enter / exit vehicle'],
-  ['E', 'Interact'],
+  ['E', 'Interact / gym / food'],
   ['C', 'Crouch'],
-  ['CLICK', 'Fire'],
-  ['R', 'Reload'],
-  ['M', 'City map'],
-  ['T', 'Change weather'],
+  ['CLICK / RMB', 'Fire / aim sights'],
+  ['TAB / Q', 'Weapon wheel (slow-mo)'],
+  ['B / R', 'Weapon mod / reload'],
+  ['J', 'San Andreas RPG stats'],
+  ['G / H', 'Recruit street homies'],
+  ['M / T', 'City map / weather'],
   ['ESC', 'Pause'],
 ]
 
@@ -132,6 +149,8 @@ function buildConePath(cx: number, cz: number, heading: number, rangeMeters: num
 /** DOM overlay for the game. The host owns simulation, pointer lock and input. */
 export class GameHud {
   private readonly element: HTMLElement
+  readonly wantedHud: WantedHUD
+  readonly combat: CombatHud
   private view: View = 'title'
   private returnView: ReturnView = 'title'
   private toastTimer: number | undefined
@@ -142,8 +161,30 @@ export class GameHud {
     this.element.innerHTML = this.template()
     this.element.querySelector('.vbn-map-legend')?.insertAdjacentHTML('beforeend', '<p class="vbn-map-symbol-key">◆ OBJECTIVE &nbsp; · &nbsp; ■ SAFEHOUSE</p>')
     root.replaceChildren(this.element)
+
+    const wantedMount = this.element.querySelector<HTMLElement>('[data-wanted-mount]')!
+    this.wantedHud = new WantedHUD(wantedMount)
+
+    const gamePanel = this.element.querySelector<HTMLElement>('[data-view-panel="game"]')!
+    const combatCallbacks: CombatHudCallbacks = callbacks.combat ?? {
+      selectSector: () => {},
+      selectWeapon: () => {},
+      toggleAttachment: () => {},
+      closeWheel: () => {},
+      closeStats: () => {},
+    }
+    this.combat = new CombatHud(gamePanel, combatCallbacks)
+
     this.element.addEventListener('click', event => this.onClick(event))
     this.showTitle()
+  }
+
+  updateCombat(dt: number, state: CombatHudState): void {
+    this.combat.update(dt, state, this.view === 'game')
+  }
+
+  triggerHitmarker(kind: 'normal' | 'critical' | 'armor' = 'normal'): void {
+    this.combat.triggerHitmarker(kind)
   }
 
   showTitle(): void { this.setView('title') }
@@ -183,10 +224,12 @@ export class GameHud {
   update(state: HudState): void {
     const number = (value: number, fallback = 0): number => Number.isFinite(value) ? value : fallback
     const health = Math.max(0, Math.min(100, number(state.health)))
+    const stamina = Math.max(0, Math.min(100, number(state.stamina ?? 100)))
     const wanted = Math.max(0, Math.min(6, Math.floor(number(state.wanted))))
     this.text('money', `$${Math.max(0, Math.floor(number(state.money))).toLocaleString('en-US')}`)
     this.text('health', `${Math.round(health)}`)
-    this.text('ammo', `${Math.max(0, Math.floor(number(state.ammo)))}`)
+    this.text('weapon', state.weaponName || 'WEAPON / AMMO')
+    this.text('ammo', state.weaponAmmoText || `${Math.max(0, Math.floor(number(state.ammo)))}`)
     this.text('district', state.district || 'VICE BAY')
     this.text('objective', state.objective || 'Explore Vice Bay')
     this.text('time', state.time || '--:--')
@@ -195,45 +238,27 @@ export class GameHud {
     this.text('speed', `${Math.round(Math.abs(number(state.speed)))}`)
     this.text('prompt', state.prompt || '')
     this.element.querySelectorAll<HTMLElement>('[data-health-fill]').forEach(el => { el.style.width = `${health}%` })
+    this.element.querySelectorAll<HTMLElement>('[data-stamina-fill]').forEach(el => { el.style.width = `${stamina}%` })
 
-    this.element.querySelectorAll<HTMLElement>('[data-wanted-segment]').forEach((el, i) => {
-      const seg = i + 1
-      el.hidden = seg === 6 && wanted < 6
-      el.classList.toggle('is-lit', i < wanted)
-      el.dataset.level = String(wanted)
-    })
+    const squadEl = this.element.querySelector<HTMLElement>('[data-squad-badge]')
+    if (squadEl) {
+      const hCount = state.homies ?? 0
+      const hMax = state.maxHomies ?? 1
+      squadEl.textContent = `HOMIES ${hCount}/${hMax}`
+      squadEl.classList.toggle('is-active', hCount > 0)
+    }
 
-    const heat = state.heat
-    this.element.querySelectorAll<HTMLElement>('[data-wanted]').forEach(el => {
-      el.setAttribute('aria-label', `Wanted level: ${wanted} out of 6`)
-      el.classList.toggle('is-pursuit', Boolean(heat && heat.wanted > 0 && heat.inSight))
-      el.classList.toggle('is-evading', Boolean(heat && heat.wanted > 0 && !heat.inSight))
-      el.classList.toggle('is-witness', Boolean(heat && heat.phase === 'witness'))
-      el.classList.toggle('is-lockdown', wanted >= 6)
-    })
-
-    const heatWrap = this.element.querySelector<HTMLElement>('[data-heat-wrap]')
-    if (heatWrap) {
-      const showHeat = Boolean(heat && heat.phase !== 'clear')
-      heatWrap.hidden = !showHeat
-      if (heat && showHeat) {
-        heatWrap.dataset.phase = heat.phase
-        this.text('heat-status', heat.statusText)
-        const pct = heat.phase === 'witness'
-          ? heat.witnessProgress
-          : heat.phase === 'evading'
-            ? heat.cooldownProgress
-            : heat.reinforcementProgress
-        const fill = heatWrap.querySelector<HTMLElement>('[data-heat-fill]')
-        if (fill) fill.style.width = `${Math.round(pct * 100)}%`
-        const ring = heatWrap.querySelector<SVGCircleElement>('[data-heat-ring]')
-        if (ring) {
-          const circumference = 87.96
-          ring.style.strokeDasharray = `${circumference}`
-          ring.style.strokeDashoffset = `${(circumference * (1 - Math.max(0, Math.min(1, pct)))).toFixed(2)}`
-        }
+    const turfEl = this.element.querySelector<HTMLElement>('[data-turf-banner]')
+    if (turfEl) {
+      turfEl.hidden = !state.turfWar
+      if (state.turfWar) {
+        this.text('turf-title', `TURF WAR · ${state.turfWar.zoneName.toUpperCase()}`)
+        this.text('turf-wave', `WAVE ${state.turfWar.wave}/${state.turfWar.totalWaves} · ${state.turfWar.remaining} LEFT`)
       }
     }
+
+    const heat = state.heat
+    this.wantedHud.update(wanted, heat)
 
     const dispatchEl = this.element.querySelector<HTMLElement>('[data-dispatch-banner]')
     if (dispatchEl) {
@@ -333,6 +358,47 @@ export class GameHud {
         el.classList.toggle('is-swat', unit.kind === 'swat')
         el.classList.toggle('is-military', unit.kind === 'military')
         place(el, unit)
+      })
+    })
+
+    const zones = state.gangZones ?? []
+    if (zones.length > 0) {
+      const zonesMarkup = zones.map(z => {
+        const zx = toMapPct(z.x)
+        const zz = toMapPct(z.z)
+        const zr = Math.max(4, Math.min(16, (z.radius / 760) * 100))
+        return `<circle class="vbn-map-zone${z.warActive ? ' is-war' : ''}" cx="${zx.toFixed(2)}" cy="${zz.toFixed(2)}" r="${zr.toFixed(2)}" style="fill:${z.color};stroke:${z.color}"/>`
+      }).join('')
+      this.element.querySelectorAll<SVGSVGElement>('.vbn-map-zones').forEach(svg => { svg.innerHTML = zonesMarkup })
+    }
+
+    const homies = state.homieBlips ?? []
+    this.element.querySelectorAll<HTMLElement>('.vbn-map-homies').forEach(container => {
+      while (container.children.length < homies.length) {
+        const dot = document.createElement('i')
+        dot.className = 'vbn-map-homie'
+        container.append(dot)
+      }
+      while (container.children.length > homies.length) container.lastElementChild?.remove()
+      homies.forEach((h, idx) => {
+        const el = container.children[idx] as HTMLElement
+        el.classList.toggle('is-recruited', h.recruited)
+        place(el, h)
+      })
+    })
+
+    const rivals = state.rivalBlips ?? []
+    this.element.querySelectorAll<HTMLElement>('.vbn-map-rivals').forEach(container => {
+      while (container.children.length < rivals.length) {
+        const dot = document.createElement('i')
+        dot.className = 'vbn-map-rival'
+        container.append(dot)
+      }
+      while (container.children.length > rivals.length) container.lastElementChild?.remove()
+      rivals.forEach((r, idx) => {
+        const el = container.children[idx] as HTMLElement
+        el.style.background = r.color
+        place(el, r)
       })
     })
 
@@ -480,25 +546,19 @@ export class GameHud {
           <span class="vbn-dispatch-badge" data-value="dispatch-code">10-31</span>
           <span class="vbn-dispatch-msg" data-value="dispatch-text">DISPATCH: 10-31 IN PROGRESS</span>
         </div>
+        <div class="vbn-turf-banner" data-turf-banner hidden>
+          <strong data-value="turf-title">TURF WAR</strong>
+          <span data-value="turf-wave">WAVE 1/3</span>
+        </div>
         <div class="vbn-game-top-left">
           <div class="vbn-hud-kicker"><span class="vbn-live-dot"></span> VICE BAY <b>/</b> <span data-value="district">VICE BAY</span></div>
           <div class="vbn-objective"><span class="vbn-objective-icon">${icons.target}</span><div><small>CURRENT OBJECTIVE</small><strong data-value="objective">Explore Vice Bay</strong></div></div>
-          <div class="vbn-world-meta"><span data-value="time">--:--</span><i></i><span data-value="weather">CLEAR</span><i></i><span data-value="mode">ON FOOT</span></div>
+          <div class="vbn-world-meta"><span data-value="time">--:--</span><i></i><span data-value="weather">CLEAR</span><i></i><span data-value="mode">ON FOOT</span><i></i><span class="vbn-squad-pill" data-squad-badge>HOMIES 0/1</span></div>
         </div>
         <div class="vbn-game-top-right">
           <div class="vbn-money"><small>CASH ON HAND</small><strong data-value="money">$0</strong></div>
-          <div class="vbn-stars" data-wanted aria-label="Wanted level: 0 out of 6">${Array.from({ length: 6 }, (_, i) => `<span class="vbn-wanted-segment${i === 5 ? ' is-lockdown-star' : ''}" data-wanted-segment="${i + 1}"${i === 5 ? ' hidden' : ''} aria-hidden="true">${icons.star}</span>`).join('')}</div>
-          <div class="vbn-heat-wrap" data-heat-wrap hidden>
-            <div class="vbn-heat-meta">
-              <span class="vbn-heat-status" data-value="heat-status">IN SIGHT</span>
-              <span class="vbn-heat-track"><i data-heat-fill></i></span>
-            </div>
-            <svg class="vbn-heat-ring" viewBox="0 0 36 36" aria-hidden="true">
-              <circle class="vbn-heat-ring-bg" cx="18" cy="18" r="14"/>
-              <circle class="vbn-heat-ring-fg" data-heat-ring cx="18" cy="18" r="14"/>
-            </svg>
-          </div>
-          <div class="vbn-vitals"><span class="vbn-vital-icon">${icons.heart}</span><div class="vbn-health"><div><small>HEALTH</small><b data-value="health">100</b></div><span class="vbn-health-track"><i data-health-fill></i></span></div><div class="vbn-ammo"><small>WEAPON / AMMO</small><strong data-value="ammo">0</strong></div></div>
+          <div data-wanted-mount></div>
+          <div class="vbn-vitals"><span class="vbn-vital-icon">${icons.heart}</span><div class="vbn-health"><div><small>HEALTH</small><b data-value="health">100</b></div><span class="vbn-health-track"><i data-health-fill></i></span><span class="vbn-stamina-track"><i data-stamina-fill></i></span></div><div class="vbn-ammo"><small data-value="weapon">WEAPON / AMMO</small><strong data-value="ammo">0</strong></div></div>
         </div>
         <div class="vbn-game-bottom-left">
           <div class="vbn-minimap-frame"><div class="vbn-minimap">${mapArt()}</div><span class="vbn-map-corner">N</span></div>

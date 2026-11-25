@@ -62,6 +62,18 @@
           "type": "object",
           "description": "Player wanted stars, pursuit phase, and last known position."
         },
+        "rpgStats": {
+          "type": "object",
+          "description": "San Andreas RPG character stats (respect, staminaSkill, muscle, fat, hunger, weaponSkill, drivingSkill)."
+        },
+        "weaponArsenal": {
+          "type": "object",
+          "description": "Equipped weapon ID, per-weapon attachments, and reserve ammo by weapon category."
+        },
+        "capturedTurfs": {
+          "type": "array",
+          "description": "District turf zone IDs captured by Vice Crew."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
