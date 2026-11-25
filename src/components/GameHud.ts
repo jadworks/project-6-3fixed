@@ -1,6 +1,7 @@
 import './gameHud.css'
 import type { CutsceneHudState } from '../game/cutscene'
 import type { HeatHudState } from '../game/heatSystem'
+import type { PoliceRadarUnit } from '../game/cityLife'
 
 export type HudState = {
   money: number
@@ -21,6 +22,8 @@ export type HudState = {
   safehouses: { x: number; z: number }[]
   heat?: HeatHudState
   police?: { x: number; z: number; kind: 'cop' | 'heli' }[]
+  policeRadars?: PoliceRadarUnit[]
+  nearestPursuerDist?: number
 }
 
 export type HudCallbacks = {
@@ -35,6 +38,7 @@ export type HudCallbacks = {
   retryLeaderboard: () => Promise<string>
   skipCutscene?: () => void
   replayIntro?: () => void
+  auth?: () => void
 }
 
 type View = 'title' | 'game' | 'pause' | 'map' | 'controls' | 'missions' | 'leaderboard' | 'cutscene'
@@ -47,6 +51,7 @@ const icons = {
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
   target: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>',
   heart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20S4 15 4 9.5a4.5 4.5 0 0 1 8-2.8 4.5 4.5 0 0 1 8 2.8C20 15 12 20 12 20Z"/></svg>',
+  star: '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.4 14.95 8.5 21.7 9.45 16.8 14.2 18 20.9 12 17.7 6 20.9 7.2 14.2 2.3 9.45 9.05 8.5 12 2.4"/></svg>',
 }
 
 const mapArt = (): string => `
@@ -63,11 +68,13 @@ const mapArt = (): string => `
     <path d="M236 19v15m-7-7h15" stroke="#e7f6ee" stroke-width="1.3"/>
     <text x="232" y="16" fill="#e7f6ee" font-size="9" font-family="sans-serif" font-weight="bold">N</text>
   </svg>
+  <svg class="vbn-map-cones" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
   <span class="vbn-map-marker vbn-marker-beach" title="Vice Beach"><i></i></span>
   <span class="vbn-map-marker vbn-marker-downtown" title="Downtown"><i></i></span>
   <span class="vbn-map-marker vbn-marker-port" title="Port Vice"><i></i></span>
   <span class="vbn-map-marker vbn-marker-wetlands" title="The Wetlands"><i></i></span>
   <span class="vbn-map-lkp" title="Police search zone" hidden></span>
+  <span class="vbn-map-witnesses"></span>
   <span class="vbn-map-police"></span>
   <span class="vbn-map-homes"></span>
   <span class="vbn-map-target" title="Current objective" hidden></span>
@@ -102,6 +109,26 @@ function formatClock(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`
 }
 
+function toMapPct(val: number): number {
+  return Math.max(2, Math.min(98, (val + 380) / 760 * 100))
+}
+
+function buildConePath(cx: number, cz: number, heading: number, rangeMeters: number, fovDeg: number, sweepOffset: number): string {
+  const r = Math.min(18, Math.max(2.6, rangeMeters / 760 * 100))
+  const half = (fovDeg * Math.PI / 180) * 0.5
+  const baseAngle = heading + sweepOffset
+  const pts: string[] = [`M ${cx.toFixed(2)} ${cz.toFixed(2)}`]
+  const steps = 6
+  for (let i = 0; i <= steps; i += 1) {
+    const a = baseAngle - half + (i / steps) * (half * 2)
+    const x = cx + Math.sin(a) * r
+    const y = cz + Math.cos(a) * r
+    pts.push(`L ${x.toFixed(2)} ${y.toFixed(2)}`)
+  }
+  pts.push('Z')
+  return pts.join(' ')
+}
+
 /** DOM overlay for the game. The host owns simulation, pointer lock and input. */
 export class GameHud {
   private readonly element: HTMLElement
@@ -123,6 +150,12 @@ export class GameHud {
   showGame(): void { this.setView('game') }
   showPause(): void { this.setView('pause') }
   showCutscene(): void { this.setView('cutscene') }
+  setAuthStatus(name: string | null): void {
+    const signedIn = Boolean(name)
+    this.text('auth-title', signedIn ? `CLOUD SYNC: ${name} · SIGN OUT` : 'SIGN IN WITH GOOGLE (CLOUD SAVE)')
+    this.text('auth-pause', signedIn ? `CLOUD ACCOUNT: ${name} (SIGN OUT)` : 'SIGN IN WITH GOOGLE (CLOUD SAVE)')
+    this.text('auth-board', signedIn ? `SIGNED IN AS ${name}` : 'SIGN IN WITH GOOGLE TO POST SCORE')
+  }
   showMap(): void {
     if (this.view !== 'map') this.returnView = this.baseView()
     this.setView('map')
@@ -150,7 +183,7 @@ export class GameHud {
   update(state: HudState): void {
     const number = (value: number, fallback = 0): number => Number.isFinite(value) ? value : fallback
     const health = Math.max(0, Math.min(100, number(state.health)))
-    const wanted = Math.max(0, Math.min(5, Math.floor(number(state.wanted))))
+    const wanted = Math.max(0, Math.min(6, Math.floor(number(state.wanted))))
     this.text('money', `$${Math.max(0, Math.floor(number(state.money))).toLocaleString('en-US')}`)
     this.text('health', `${Math.round(health)}`)
     this.text('ammo', `${Math.max(0, Math.floor(number(state.ammo)))}`)
@@ -162,14 +195,23 @@ export class GameHud {
     this.text('speed', `${Math.round(Math.abs(number(state.speed)))}`)
     this.text('prompt', state.prompt || '')
     this.element.querySelectorAll<HTMLElement>('[data-health-fill]').forEach(el => { el.style.width = `${health}%` })
-    this.element.querySelectorAll<HTMLElement>('[data-wanted-segment]').forEach((el, i) => { el.classList.toggle('is-lit', i < wanted); el.dataset.level = String(wanted) })
+
+    this.element.querySelectorAll<HTMLElement>('[data-wanted-segment]').forEach((el, i) => {
+      const seg = i + 1
+      el.hidden = seg === 6 && wanted < 6
+      el.classList.toggle('is-lit', i < wanted)
+      el.dataset.level = String(wanted)
+    })
+
     const heat = state.heat
     this.element.querySelectorAll<HTMLElement>('[data-wanted]').forEach(el => {
-      el.setAttribute('aria-label', `Wanted level: ${wanted} out of 5`)
+      el.setAttribute('aria-label', `Wanted level: ${wanted} out of 6`)
       el.classList.toggle('is-pursuit', Boolean(heat && heat.wanted > 0 && heat.inSight))
       el.classList.toggle('is-evading', Boolean(heat && heat.wanted > 0 && !heat.inSight))
       el.classList.toggle('is-witness', Boolean(heat && heat.phase === 'witness'))
+      el.classList.toggle('is-lockdown', wanted >= 6)
     })
+
     const heatWrap = this.element.querySelector<HTMLElement>('[data-heat-wrap]')
     if (heatWrap) {
       const showHeat = Boolean(heat && heat.phase !== 'clear')
@@ -177,13 +219,39 @@ export class GameHud {
       if (heat && showHeat) {
         heatWrap.dataset.phase = heat.phase
         this.text('heat-status', heat.statusText)
+        const pct = heat.phase === 'witness'
+          ? heat.witnessProgress
+          : heat.phase === 'evading'
+            ? heat.cooldownProgress
+            : heat.reinforcementProgress
         const fill = heatWrap.querySelector<HTMLElement>('[data-heat-fill]')
-        if (fill) {
-          const pct = heat.phase === 'witness' ? heat.witnessProgress : heat.phase === 'evading' ? heat.cooldownProgress : 1
-          fill.style.width = `${Math.round(pct * 100)}%`
+        if (fill) fill.style.width = `${Math.round(pct * 100)}%`
+        const ring = heatWrap.querySelector<SVGCircleElement>('[data-heat-ring]')
+        if (ring) {
+          const circumference = 87.96
+          ring.style.strokeDasharray = `${circumference}`
+          ring.style.strokeDashoffset = `${(circumference * (1 - Math.max(0, Math.min(1, pct)))).toFixed(2)}`
         }
       }
     }
+
+    const dispatchEl = this.element.querySelector<HTMLElement>('[data-dispatch-banner]')
+    if (dispatchEl) {
+      const banner = heat?.dispatchBanner
+      dispatchEl.hidden = !banner
+      if (banner) {
+        dispatchEl.dataset.level = String(banner.level)
+        this.text('dispatch-code', banner.code)
+        this.text('dispatch-text', banner.text)
+      }
+    }
+
+    const nearPursuer = wanted > 0 && Number.isFinite(state.nearestPursuerDist) && (state.nearestPursuerDist ?? Infinity) <= 60
+    this.element.querySelectorAll<HTMLElement>('.vbn-minimap-frame').forEach(el => {
+      el.classList.toggle('is-siren-near', nearPursuer)
+      el.classList.toggle('is-lockdown', wanted >= 6)
+    })
+
     this.element.querySelectorAll<HTMLElement>('[data-vehicle-only]').forEach(el => { el.hidden = !state.inVehicle })
     this.element.querySelectorAll<HTMLElement>('[data-prompt-wrap]').forEach(el => { el.hidden = !state.prompt })
     const x = Math.max(3, Math.min(97, (number(state.x) + 380) / 760 * 100))
@@ -206,20 +274,68 @@ export class GameHud {
       el.hidden = !lkp
       if (lkp) place(el, lkp)
     })
-    const policeList = state.police ?? []
+
+    const radarUnits = state.policeRadars ?? []
+    const sweepOffset = heat && heat.wanted > 0 && !heat.inSight ? Math.sin(performance.now() * 0.0024) * 0.42 : 0
+    const strobeRed = Math.floor(performance.now() / 220) % 2 === 0
+    const conesMarkup = radarUnits.map(unit => {
+      const cx = toMapPct(number(unit.x))
+      const cz = toMapPct(number(unit.z))
+      const isChase = Boolean(heat && heat.wanted > 0 && (unit.inSight || heat.inSight))
+      const isSearch = Boolean(heat && heat.wanted > 0 && !isChase)
+      const coneClass = unit.kind === 'military'
+        ? 'vbn-cone is-military'
+        : isChase
+          ? `vbn-cone is-pursuit ${strobeRed ? 'is-red' : 'is-blue'}`
+          : isSearch
+            ? 'vbn-cone is-search'
+            : 'vbn-cone is-patrol'
+      if (unit.fovDeg >= 350) {
+        const r = Math.min(18, Math.max(3, unit.range / 760 * 100))
+        return `<circle class="${coneClass}" cx="${cx.toFixed(2)}" cy="${cz.toFixed(2)}" r="${r.toFixed(2)}"/>`
+      }
+      const d = buildConePath(cx, cz, unit.heading, unit.range, unit.fovDeg, isSearch ? sweepOffset : 0)
+      return `<path class="${coneClass}" d="${d}"/>`
+    }).join('')
+    this.element.querySelectorAll<SVGSVGElement>('.vbn-map-cones').forEach(svg => {
+      svg.innerHTML = conesMarkup
+    })
+
+    const witnessList = heat?.witnesses ?? []
+    this.element.querySelectorAll<HTMLElement>('.vbn-map-witnesses').forEach(container => {
+      while (container.children.length < witnessList.length) {
+        const mark = document.createElement('i')
+        mark.className = 'vbn-map-witness'
+        mark.textContent = '!'
+        container.append(mark)
+      }
+      while (container.children.length > witnessList.length) container.lastElementChild?.remove()
+      witnessList.forEach((w, idx) => {
+        const el = container.children[idx] as HTMLElement
+        el.classList.toggle('is-reporting', w.state === 'reporting')
+        place(el, w)
+      })
+    })
+
+    const policeMarkers = radarUnits.length > 0
+      ? radarUnits.map(u => ({ x: u.x, z: u.z, kind: u.kind }))
+      : (state.police ?? []).map(p => ({ x: p.x, z: p.z, kind: p.kind }))
     this.element.querySelectorAll<HTMLElement>('.vbn-map-police').forEach(container => {
-      while (container.children.length < policeList.length) {
+      while (container.children.length < policeMarkers.length) {
         const dot = document.createElement('i')
         dot.className = 'vbn-map-cop'
         container.append(dot)
       }
-      while (container.children.length > policeList.length) container.lastElementChild?.remove()
-      policeList.forEach((unit, idx) => {
+      while (container.children.length > policeMarkers.length) container.lastElementChild?.remove()
+      policeMarkers.forEach((unit, idx) => {
         const el = container.children[idx] as HTMLElement
         el.classList.toggle('is-heli', unit.kind === 'heli')
+        el.classList.toggle('is-swat', unit.kind === 'swat')
+        el.classList.toggle('is-military', unit.kind === 'military')
         place(el, unit)
       })
     })
+
     this.element.querySelectorAll<HTMLElement>('.vbn-map-homes').forEach(container => {
       while (container.children.length < state.safehouses.length) {
         const marker = document.createElement('i')
@@ -307,6 +423,7 @@ export class GameHud {
       case 'back': this.goBack(); break
       case 'audio': this.callbacks.audio(); break
       case 'weather': this.callbacks.weather(); break
+      case 'auth': this.callbacks.auth?.(); break
       case 'quit': this.callbacks.quit(); this.showTitle(); break
       case 'mission': {
         const id = button.dataset.mission
@@ -331,8 +448,9 @@ export class GameHud {
             <button type="button" class="vbn-btn vbn-btn-secondary" data-action="missions"><span><small>02 / PICK YOUR STORY</small><strong>MISSION SELECT</strong></span>${icons.arrow}</button>
             <button type="button" class="vbn-btn vbn-btn-secondary" data-action="controls"><span><small>03 / KNOW THE STREETS</small><strong>CONTROLS</strong></span>${icons.arrow}</button>
             <div class="vbn-title-links">
-              <button type="button" class="vbn-title-board" data-action="leaderboard">ONLINE LEADERBOARD <span>↗</span></button>
+              <button type="button" class="vbn-title-board" data-action="leaderboard">FIRESTORE LEADERBOARD <span>↗</span></button>
               <button type="button" class="vbn-title-board" data-action="replay-intro">OPENING STORY (2:00) <span>▶</span></button>
+              <button type="button" class="vbn-title-board" data-action="auth"><em data-value="auth-title" style="font-style:normal">SIGN IN WITH GOOGLE (CLOUD SAVE)</em> <span>✦</span></button>
             </div>
           </nav>
         </div>
@@ -358,6 +476,10 @@ export class GameHud {
       </section>
 
       <section class="vbn-game" data-view-panel="game" aria-label="Game status" hidden><div class="vbn-camera-grade" aria-hidden="true"></div>
+        <div class="vbn-dispatch-banner" data-dispatch-banner hidden>
+          <span class="vbn-dispatch-badge" data-value="dispatch-code">10-31</span>
+          <span class="vbn-dispatch-msg" data-value="dispatch-text">DISPATCH: 10-31 IN PROGRESS</span>
+        </div>
         <div class="vbn-game-top-left">
           <div class="vbn-hud-kicker"><span class="vbn-live-dot"></span> VICE BAY <b>/</b> <span data-value="district">VICE BAY</span></div>
           <div class="vbn-objective"><span class="vbn-objective-icon">${icons.target}</span><div><small>CURRENT OBJECTIVE</small><strong data-value="objective">Explore Vice Bay</strong></div></div>
@@ -365,10 +487,16 @@ export class GameHud {
         </div>
         <div class="vbn-game-top-right">
           <div class="vbn-money"><small>CASH ON HAND</small><strong data-value="money">$0</strong></div>
-          <div class="vbn-stars" data-wanted aria-label="Wanted level: 0 out of 5">${Array.from({ length: 5 }, (_, i) => `<span class="vbn-wanted-segment" data-wanted-segment="${i + 1}" aria-hidden="true"><i></i></span>`).join('')}</div>
+          <div class="vbn-stars" data-wanted aria-label="Wanted level: 0 out of 6">${Array.from({ length: 6 }, (_, i) => `<span class="vbn-wanted-segment${i === 5 ? ' is-lockdown-star' : ''}" data-wanted-segment="${i + 1}"${i === 5 ? ' hidden' : ''} aria-hidden="true">${icons.star}</span>`).join('')}</div>
           <div class="vbn-heat-wrap" data-heat-wrap hidden>
-            <span class="vbn-heat-status" data-value="heat-status">IN SIGHT</span>
-            <span class="vbn-heat-track"><i data-heat-fill></i></span>
+            <div class="vbn-heat-meta">
+              <span class="vbn-heat-status" data-value="heat-status">IN SIGHT</span>
+              <span class="vbn-heat-track"><i data-heat-fill></i></span>
+            </div>
+            <svg class="vbn-heat-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="vbn-heat-ring-bg" cx="18" cy="18" r="14"/>
+              <circle class="vbn-heat-ring-fg" data-heat-ring cx="18" cy="18" r="14"/>
+            </svg>
           </div>
           <div class="vbn-vitals"><span class="vbn-vital-icon">${icons.heart}</span><div class="vbn-health"><div><small>HEALTH</small><b data-value="health">100</b></div><span class="vbn-health-track"><i data-health-fill></i></span></div><div class="vbn-ammo"><small>WEAPON / AMMO</small><strong data-value="ammo">0</strong></div></div>
         </div>
@@ -381,11 +509,11 @@ export class GameHud {
       </section>
 
       <section class="vbn-overlay" data-view-panel="pause" aria-label="Pause menu" hidden>
-        <div class="vbn-modal vbn-pause-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> PAUSE MENU</span><span class="vbn-modal-index">01 — 04</span></div><p class="vbn-section-label">TAKE A BREATH</p><h2>PAUSED<span>.</span></h2><p class="vbn-modal-copy">The city can wait. For a moment.</p><nav class="vbn-modal-menu" aria-label="Pause options"><button type="button" class="vbn-btn vbn-btn-primary" data-action="resume"><span><strong>RESUME GAME</strong></span>${icons.arrow}</button><button type="button" class="vbn-menu-row" data-action="map"><span>CITY MAP</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="missions"><span>MISSION SELECT</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="replay-intro"><span>REPLAY OPENING STORY (2:00)</span><span>▶</span></button><button type="button" class="vbn-menu-row" data-action="leaderboard"><span>ONLINE LEADERBOARD</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="controls"><span>CONTROLS</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="audio"><span>TOGGLE AUDIO</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="weather"><span>CHANGE WEATHER</span><span>↗</span></button><button type="button" class="vbn-menu-row vbn-quit" data-action="quit"><span>RETURN TO TITLE</span><span>↗</span></button></nav><div class="vbn-modal-foot">THE NIGHT IS STILL YOUNG <span>✦</span></div></div>
+        <div class="vbn-modal vbn-pause-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> PAUSE MENU</span><span class="vbn-modal-index">01 — 04</span></div><p class="vbn-section-label">TAKE A BREATH</p><h2>PAUSED<span>.</span></h2><p class="vbn-modal-copy">The city can wait. For a moment.</p><nav class="vbn-modal-menu" aria-label="Pause options"><button type="button" class="vbn-btn vbn-btn-primary" data-action="resume"><span><strong>RESUME GAME</strong></span>${icons.arrow}</button><button type="button" class="vbn-menu-row" data-action="map"><span>CITY MAP</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="missions"><span>MISSION SELECT</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="replay-intro"><span>REPLAY OPENING STORY (2:00)</span><span>▶</span></button><button type="button" class="vbn-menu-row" data-action="leaderboard"><span>FIRESTORE LEADERBOARD</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="auth"><span data-value="auth-pause">SIGN IN WITH GOOGLE (CLOUD SAVE)</span><span>✦</span></button><button type="button" class="vbn-menu-row" data-action="controls"><span>CONTROLS</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="audio"><span>TOGGLE AUDIO</span><span>↗</span></button><button type="button" class="vbn-menu-row" data-action="weather"><span>CHANGE WEATHER</span><span>↗</span></button><button type="button" class="vbn-menu-row vbn-quit" data-action="quit"><span>RETURN TO TITLE</span><span>↗</span></button></nav><div class="vbn-modal-foot">THE NIGHT IS STILL YOUNG <span>✦</span></div></div>
       </section>
 
-      <section class="vbn-overlay" data-view-panel="leaderboard" aria-label="Online leaderboard" hidden>
-        <div class="vbn-modal vbn-wide-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> ONLINE</span><button class="vbn-close" data-action="back" type="button" aria-label="Back">${icons.close}</button></div><p class="vbn-section-label">THE CITY'S CONTRACTS</p><h2>LEADER<span>BOARD.</span></h2><p class="vbn-modal-copy">Casual, client-reported rankings by contracts completed in a session. Guest scores are tied to this browser.</p><div class="vbn-board-list" data-value="leaderboard" role="status" aria-live="polite">Loading scores…</div><p class="vbn-board-status" data-value="board-status" role="status" aria-live="polite"></p><div class="vbn-board-actions"><button class="vbn-menu-row" type="button" data-action="refresh-board">REFRESH SCORES ↗</button><button class="vbn-menu-row" type="button" data-action="retry-board">RETRY FAILED SUBMISSION ↗</button></div><button class="vbn-back" type="button" data-action="back">← &nbsp; BACK</button></div>
+      <section class="vbn-overlay" data-view-panel="leaderboard" aria-label="Firestore leaderboard" hidden>
+        <div class="vbn-modal vbn-wide-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> FIREBASE</span><button class="vbn-close" data-action="back" type="button" aria-label="Back">${icons.close}</button></div><p class="vbn-section-label">THE CITY'S CONTRACTS</p><h2>LEADER<span>BOARD.</span></h2><p class="vbn-modal-copy">Live rankings and cloud saves powered by Google Firebase Firestore. Sign in with Google to post your contract completions.</p><div class="vbn-board-list" data-value="leaderboard" role="status" aria-live="polite">Loading scores…</div><p class="vbn-board-status" data-value="board-status" role="status" aria-live="polite"></p><div class="vbn-board-actions"><button class="vbn-menu-row" type="button" data-action="auth"><span data-value="auth-board">SIGN IN WITH GOOGLE TO POST SCORE</span> <span>✦</span></button><button class="vbn-menu-row" type="button" data-action="refresh-board">REFRESH SCORES ↗</button><button class="vbn-menu-row" type="button" data-action="retry-board">RETRY FAILED SUBMISSION ↗</button></div><button class="vbn-back" type="button" data-action="back">← &nbsp; BACK</button></div>
       </section>
 
       <section class="vbn-overlay" data-view-panel="missions" aria-label="Mission selection" hidden>

@@ -11,10 +11,6 @@ async function boot(): Promise<void> {
   const renderer = new Renderer(canvas, 'medium')
   const input = new Input(canvas)
   const game = new ViceGame(renderer, input, new ViceAudio(), root)
-  if (import.meta.env.DEV) {
-    const [{ registerGameTuning }, { tuning }] = await Promise.all([import('../scripts/manus-tuning/adapter.js'), import('./game/tuning')])
-    await registerGameTuning(tuning)
-  }
   const loop = new GameLoop({ beforeFrame: dt => input.update(dt), step: dt => game.step(dt), render: (_alpha, dt) => game.render(dt) })
   canvas.addEventListener('click', () => { if (game.mode === 'playing') input.lockPointer() })
   loop.start()

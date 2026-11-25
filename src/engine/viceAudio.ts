@@ -44,8 +44,8 @@ export class ViceAudio {
     const t = c.currentTime
     this.engine.frequency.setTargetAtTime(48 + Math.min(145, Math.abs(speed) * 3.3), t, .08)
     this.engineGain.gain.setTargetAtTime(playing && inVehicle ? .17 : 0, t, .12)
-    this.siren.frequency.setTargetAtTime(620 + 220 * (.5 + .5 * Math.sin(t * (inSight ? 5.2 : 2.8))), t, .04)
-    this.sirenGain.gain.setTargetAtTime(playing && wanted > 0 ? (inSight ? .048 : .018) : 0, t, .1)
+    this.siren.frequency.setTargetAtTime(620 + 220 * (.5 + .5 * Math.sin(t * (inSight ? 5.2 + wanted * 0.35 : 2.8))), t, .04)
+    this.sirenGain.gain.setTargetAtTime(playing && wanted > 0 ? (inSight ? Math.min(0.075, .042 + wanted * 0.005) : .018) : 0, t, .1)
     if ((playing || this.cutsceneActive) && t >= this.nextBeat) {
       this.nextBeat = t + (this.cutsceneActive ? .36 : .29)
       const notes = this.cutsceneActive
@@ -78,8 +78,27 @@ export class ViceAudio {
   }
 
   dispatchAlert(): void {
-    this.note(988, .08, .08)
-    window.setTimeout(() => this.note(1318, .12, .08), 90)
+    this.dispatchRadio(1)
+  }
+
+  /** Police radio dispatch squelch + priority chirp scaled by wanted level (1..6). */
+  dispatchRadio(level: number): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime
+    // Short VHF squelch burst
+    const n = Math.floor(c.sampleRate * 0.08)
+    const buf = c.createBuffer(1, n, c.sampleRate)
+    const ch = buf.getChannelData(0)
+    for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * 0.35
+    const src = c.createBufferSource(), bp = c.createBiquadFilter(), g = c.createGain()
+    src.buffer = buf; bp.type = 'bandpass'; bp.frequency.setValueAtTime(2100, t); bp.Q.setValueAtTime(3.2, t)
+    g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08)
+    src.connect(bp).connect(g).connect(this.master); src.start(t)
+    // Dual-tone dispatch chirp
+    const base = level >= 6 ? 1240 : level >= 3 ? 1080 : 940
+    this.note(base, .07, .075)
+    window.setTimeout(() => this.note(base * 1.32, .11, .08), 85)
+    if (level >= 4) window.setTimeout(() => this.note(base * 1.5, .14, .085), 185)
   }
 
   shoot(): void {

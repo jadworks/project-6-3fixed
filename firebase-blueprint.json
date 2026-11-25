@@ -1,0 +1,159 @@
+{
+  "entities": {
+    "PlayerSave": {
+      "title": "PlayerSave",
+      "description": "Cloud-synced campaign progress, inventory, and settings for a signed-in Vice Bay player.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the save owner.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Player display name shown in profile HUD.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "money": {
+          "type": "number",
+          "description": "In-game cash balance."
+        },
+        "health": {
+          "type": "number",
+          "description": "Current player health (0-100)."
+        },
+        "completed": {
+          "type": "array",
+          "description": "Completed mission contract IDs."
+        },
+        "upgrade": {
+          "type": "number",
+          "description": "Safehouse sprint upgrade tier (0-3)."
+        },
+        "muted": {
+          "type": "boolean",
+          "description": "Audio mute preference."
+        },
+        "weather": {
+          "type": "string",
+          "description": "Selected city atmosphere preset.",
+          "enum": ["day", "sunset", "rain", "night"]
+        },
+        "robbedStores": {
+          "type": "array",
+          "description": "Store IDs already robbed in this save."
+        },
+        "seenIntro": {
+          "type": "boolean",
+          "description": "Whether the opening 2-minute cutscene has been watched."
+        },
+        "position": {
+          "type": "object",
+          "description": "Latest player world coordinates (x, y, z)."
+        },
+        "inventory": {
+          "type": "object",
+          "description": "Player weapon, ammo, armor, and sprint tier inventory."
+        },
+        "heat": {
+          "type": "object",
+          "description": "Player wanted stars, pursuit phase, and last known position."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when cloud save was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when cloud save was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "money",
+        "health",
+        "completed",
+        "upgrade",
+        "muted",
+        "weather",
+        "robbedStores",
+        "seenIntro",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public arcade contract leaderboard entry tied to a verified Firebase Auth user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the player.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public arcade alias (no PII).",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "contractsCompleted": {
+          "type": "number",
+          "description": "Total completed contracts recorded for this player."
+        },
+        "bestDurationMs": {
+          "type": "number",
+          "description": "Fastest contract completion duration in milliseconds."
+        },
+        "lastMissionId": {
+          "type": "string",
+          "description": "Most recently completed mission ID.",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "contractsCompleted",
+        "bestDurationMs",
+        "lastMissionId",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{userId}": {
+      "schema": {
+        "$ref": "#/entities/PlayerSave"
+      },
+      "description": "Private cloud campaign save per authenticated Firebase user."
+    },
+    "/leaderboard/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/LeaderboardEntry"
+      },
+      "description": "Public top-scores leaderboard entries (document ID equals the player's Firebase Auth UID)."
+    }
+  }
+}

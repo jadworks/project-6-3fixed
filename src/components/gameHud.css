@@ -274,29 +274,67 @@
 
 .vbn-title-links { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
 
-/* GTA 6 Heat & Pursuit HUD */
-.vbn-stars.is-pursuit .is-lit { animation: vbnPursuit .45s steps(2, end) infinite; }
-.vbn-stars.is-evading .is-lit { animation: vbnEvade 1.1s ease-in-out infinite; }
+.vbn-stars { display: flex; justify-content: flex-end; align-items: center; gap: 5px; margin: 6px 0 12px; padding: 4px 0 3px; color: #68727b; line-height: 1; }
+.vbn-wanted-segment { position: relative; display: grid; place-items: center; width: 20px; height: 20px; color: rgba(154,169,184,.38); transition: transform .2s ease, color .18s ease, filter .18s ease; }
+.vbn-wanted-segment svg { width: 100%; height: 100%; fill: rgba(16,22,30,.7); stroke: rgba(145,166,184,.58); stroke-width: 1.8; }
+.vbn-wanted-segment.is-lit svg { fill: #fff6df; stroke: #ffe18a; filter: drop-shadow(0 0 6px rgba(255,225,138,.7)); }
+.vbn-wanted-segment.is-lockdown-star.is-lit svg { fill: #ff475e; stroke: #ffd369; filter: drop-shadow(0 0 9px rgba(255,71,94,.95)); }
+.vbn-stars.is-pursuit .is-lit { animation: vbnPursuit .52s ease-in-out infinite; }
+.vbn-stars.is-evading .is-lit svg { fill: rgba(110,148,186,.26); stroke: #8fb8d6; filter: none; }
+.vbn-stars.is-evading .is-lit { animation: vbnEvade 1.25s ease-in-out infinite; }
 .vbn-stars.is-witness { border-bottom: 2px solid var(--vbn-yellow); }
+.vbn-stars.is-lockdown { padding-right: 2px; }
 @keyframes vbnPursuit {
-  0% { border-color: #ff475e; box-shadow: 0 0 10px rgba(255,71,94,.7); }
-  50% { border-color: #49a6ff; box-shadow: 0 0 10px rgba(73,166,255,.7); }
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 8px rgba(255,230,150,.9)); }
+  50% { transform: scale(1.12); filter: drop-shadow(0 0 12px rgba(255,75,105,.95)); }
 }
 @keyframes vbnEvade {
-  0%, 100% { opacity: 1; border-color: #dce9ee; }
-  50% { opacity: .45; border-color: #77e6e7; }
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
 }
-.vbn-heat-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; margin: -6px 0 10px; }
-.vbn-heat-status { font-size: 9px; font-weight: 900; letter-spacing: .16em; color: #ff596e; }
+.vbn-heat-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 9px; margin: -6px 0 10px; }
+.vbn-heat-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.vbn-heat-status { font-size: 9px; font-weight: 900; letter-spacing: .16em; color: #ff6b7d; }
 .vbn-heat-wrap[data-phase="evading"] .vbn-heat-status { color: var(--vbn-cyan); }
 .vbn-heat-wrap[data-phase="witness"] .vbn-heat-status { color: var(--vbn-yellow); }
-.vbn-heat-track { width: 136px; height: 3px; background: rgba(255,255,255,.16); overflow: hidden; }
+.vbn-heat-track { width: 132px; height: 3px; background: rgba(255,255,255,.16); overflow: hidden; }
 .vbn-heat-track i { display: block; height: 100%; width: 0%; background: #ff475e; transition: width .12s linear; }
 .vbn-heat-wrap[data-phase="evading"] .vbn-heat-track i { background: var(--vbn-cyan); }
 .vbn-heat-wrap[data-phase="witness"] .vbn-heat-track i { background: var(--vbn-yellow); }
+.vbn-heat-ring { width: 26px !important; height: 26px !important; transform: rotate(-90deg); }
+.vbn-heat-ring-bg { fill: none !important; stroke: rgba(255,255,255,.18) !important; stroke-width: 3.2 !important; }
+.vbn-heat-ring-fg { fill: none !important; stroke: #ff475e !important; stroke-width: 3.2 !important; stroke-linecap: round; transition: stroke-dashoffset .12s linear; }
+.vbn-heat-wrap[data-phase="evading"] .vbn-heat-ring-fg { stroke: var(--vbn-cyan) !important; }
+.vbn-heat-wrap[data-phase="witness"] .vbn-heat-ring-fg { stroke: var(--vbn-yellow) !important; }
+
+/* Police Radio Dispatch Banner */
+.vbn-dispatch-banner { position: absolute; top: 24px; left: 50%; z-index: 4; display: flex; align-items: center; gap: 10px; max-width: min(620px, 78vw); padding: 8px 16px; border: 1px solid rgba(119,230,231,.4); border-left: 3px solid #ff475e; background: rgba(7,12,20,.92); box-shadow: 0 8px 26px rgba(0,0,0,.55); transform: translateX(-50%); }
+.vbn-dispatch-banner[data-level="6"] { border-color: rgba(255,71,94,.75); border-left-color: #f6d66d; }
+.vbn-dispatch-badge { padding: 3px 7px; background: #ff475e; color: #fff; font-size: 9px; font-weight: 900; letter-spacing: .16em; white-space: nowrap; }
+.vbn-dispatch-banner[data-level="6"] .vbn-dispatch-badge { background: linear-gradient(90deg, #e53e57, #d88f28); }
+.vbn-dispatch-msg { font-size: 11px; font-weight: 900; letter-spacing: .12em; color: #f6f3ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Minimap & Radar Vision Cones */
+.vbn-minimap-frame { transition: border-color .2s ease, box-shadow .2s ease; }
+.vbn-minimap-frame.is-siren-near { animation: vbnSirenFrame .55s steps(2, end) infinite; }
+.vbn-minimap-frame.is-lockdown { border-color: #ff475e; }
+@keyframes vbnSirenFrame {
+  0% { border-color: rgba(255,71,94,.92); box-shadow: 0 0 14px rgba(255,71,94,.45), inset 0 0 8px rgba(255,71,94,.28); }
+  50% { border-color: rgba(73,166,255,.92); box-shadow: 0 0 14px rgba(73,166,255,.45), inset 0 0 8px rgba(73,166,255,.28); }
+}
+.vbn-map-cones { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; stroke: none !important; }
+.vbn-cone.is-patrol { fill: rgba(120, 196, 255, .14); stroke: rgba(120, 196, 255, .28) !important; stroke-width: .4 !important; }
+.vbn-cone.is-search { fill: rgba(186, 240, 255, .24); stroke: rgba(119, 230, 231, .55) !important; stroke-width: .55 !important; }
+.vbn-cone.is-pursuit.is-red { fill: rgba(255, 71, 94, .3); stroke: rgba(255, 71, 94, .65) !important; stroke-width: .55 !important; }
+.vbn-cone.is-pursuit.is-blue { fill: rgba(73, 166, 255, .3); stroke: rgba(73, 166, 255, .65) !important; stroke-width: .55 !important; }
+.vbn-cone.is-military { fill: rgba(255, 138, 60, .34); stroke: rgba(246, 214, 109, .7) !important; stroke-width: .6 !important; }
 
 .vbn-map-lkp { position: absolute; width: 28px; height: 28px; border: 1.5px dashed rgba(119,230,231,.85); border-radius: 50%; background: rgba(119,230,231,.12); transform: translate(-50%,-50%); z-index: 2; pointer-events: none; }
+.vbn-map-witness { position: absolute; display: grid; place-items: center; width: 12px; height: 12px; border-radius: 50%; background: #f6d66d; color: #10151d; font-size: 9px; font-style: normal; font-weight: 900; border: 1px solid #fff; box-shadow: 0 0 8px rgba(246,214,109,.85); transform: translate(-50%,-50%); z-index: 4; pointer-events: none; }
+.vbn-map-witness.is-reporting { animation: vbnEvade .5s ease-in-out infinite; }
 .vbn-map-cop { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #ff485e; box-shadow: 0 0 6px #4da6ff; border: 1px solid #fff; transform: translate(-50%,-50%); z-index: 3; pointer-events: none; }
+.vbn-map-cop.is-swat { width: 8px; height: 8px; background: #2667ff; border-color: #ffe35e; }
+.vbn-map-cop.is-military { width: 9px; height: 9px; border-radius: 2px; background: #e87a24; border-color: #f6d66d; }
 .vbn-map-cop.is-heli { width: 9px; height: 9px; background: #ffe35e; border-color: #ff485e; }
 
 /* Cinematic Cutscene Letterbox & Dialogue */

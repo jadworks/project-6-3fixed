@@ -38,6 +38,7 @@ type VehicleParts = {
   smokeTimer: number
   fireTimer: number
   impactCooldown: number
+  punctureTimer: number
   damageStage: number
   phase: number
 }
@@ -261,6 +262,14 @@ export class VehicleSystem {
     }
   }
 
+  /** Puncture tires when driving over a 3+ star police spike strip. */
+  puncture(vehicle: Vehicle, seconds = 5.5): void {
+    const data = this.parts.get(vehicle)
+    if (!data || vehicle.type === 'helicopter' || vehicle.type === 'boat') return
+    data.punctureTimer = Math.max(data.punctureTimer, seconds)
+    this.damage(vehicle, 12)
+  }
+
   private addVehicle(type: string, name: string, color: string, x: number, z: number, heading: number, handling: Handling): void {
     const root = new THREE.Group()
     root.name = `vehicle:${name}`
@@ -275,7 +284,7 @@ export class VehicleSystem {
     const parts: VehicleParts = {
       model, paint, paintColor: paint.color.clone(), brakeLight, handling,
       wheels: [], rotor: null, tailRotor: null, panels: [], wheelAngle: 0, steerAngle: 0,
-      previousSpeed: 0, smokeTimer: 0, fireTimer: 0, impactCooldown: 0, damageStage: 0,
+      previousSpeed: 0, smokeTimer: 0, fireTimer: 0, impactCooldown: 0, punctureTimer: 0, damageStage: 0,
       phase: Math.random() * Math.PI * 2,
     }
     const vehicle: Vehicle = { root, type, name, speed: 0, health: 100, heading, velocity: new THREE.Vector3() }
@@ -321,6 +330,12 @@ export class VehicleSystem {
       else if (surface === 'sand') { grip *= 0.57; power *= 0.66; speedLimit *= 0.65 }
       else if (surface === 'dirt') { grip *= 0.7; power *= 0.82; speedLimit *= 0.82 }
       else if (inWater) { grip *= 0.28; power *= 0.2; speedLimit = 4 }
+    }
+    if (data.punctureTimer > 0) {
+      data.punctureTimer = Math.max(0, data.punctureTimer - dt)
+      grip *= 0.45
+      speedLimit *= 0.56
+      power *= 0.72
     }
     if (input.handbrake && !helicopter) grip *= 0.19
     if (v.health <= 0) power = 0

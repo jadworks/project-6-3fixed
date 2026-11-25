@@ -13,6 +13,9 @@ import { loadCitySave, saveCityProgress } from './saveSystem'
 import { CutsceneDirector, type CutsceneId, playMissionCard } from './cutscene'
 import { HeatSystem } from './heatSystem'
 import { OnlineLeaderboard } from './onlineLeaderboard'
+import { signInWithGoogle, signOutPlayer, subscribeAuth } from '../firebase/client'
+import { loadCloudPlayerSave, mergeCitySaves, persistPlayerState } from '../firebase/cloudStore'
+import type { User } from 'firebase/auth'
 import { resolvePlayerCollision, supportHeightAt, worldRayDistance } from './worldCollision'
 import { CONFIG } from './config'
 import { tuning } from './tuning'
@@ -44,6 +47,11 @@ export class ViceGame {
   private rampCooldown = 0
   private lockLostAt = 0
   private saveTimer = 0
+  private weaponHotTimer = 0
+  private aimingRightMouse = false
+  private lastSavedPos = new THREE.Vector3()
+  private lastSavedWanted = 0
+  private lastSavedAmmo = 15
   private cutsceneSkipGuard = 0
   private cutsceneWeather?: ViceWeather
   private pendingMissionTitle = ''
@@ -52,6 +60,7 @@ export class ViceGame {
   private readonly muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(.3, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffdc75 }))
   private objectiveBeacon: THREE.Group
   private readonly board = new OnlineLeaderboard(message => this.ui.toast(message))
+  private currentUser: User | null = null
 
   constructor(private readonly renderer: Renderer, private readonly input: Input, private readonly audio: ViceAudio, root: HTMLElement) {
     this.renderer.attachEnvironment(this.world.scene)
@@ -61,10 +70,10 @@ export class ViceGame {
 
     this.world.scene.add(this.player.root)
     this.muzzleFlash.visible = false; this.world.scene.add(this.muzzleFlash)
-    this.player.upgrade = this.save.upgrade
+    this.applySavedPlayerState()
     this.robbedStores = new Set(this.save.robbedStores)
     this.audio.muted = this.save.muted
-    this.camera.position.set(0, 7, 28)
+    this.camera.position.set(this.player.root.position.x, this.player.root.position.y + 7, this.player.root.position.z + 12)
     this.objectiveBeacon = new THREE.Group()
     const ring = new THREE.Mesh(new THREE.TorusGeometry(2.2, .13, 8, 32), new THREE.MeshBasicMaterial({ color: 0xffdc47 }))
     ring.rotation.x = Math.PI / 2; ring.position.y = .15
@@ -82,19 +91,114 @@ export class ViceGame {
       retryLeaderboard: () => this.board.retry(),
       skipCutscene: () => this.skipCutscene(),
       replayIntro: () => this.playOpeningCutscene(),
+      auth: () => void this.toggleAuth(),
     })
     this.ui.showTitle()
+    subscribeAuth(user => void this.handleAuthChange(user))
     document.addEventListener('pointerlockchange', () => {
       if (!document.pointerLockElement && this.mode === 'playing' && this.input.method === 'keyboard') { this.lockLostAt = performance.now(); this.pause() }
     })
-    window.addEventListener('blur', () => { if (this.mode === 'playing') this.pause() })
+    window.addEventListener('mousedown', e => { if (e.button === 2 && this.mode === 'playing') this.aimingRightMouse = true })
+    window.addEventListener('mouseup', e => { if (e.button === 2) this.aimingRightMouse = false })
+    window.addEventListener('contextmenu', e => { if (this.mode === 'playing') e.preventDefault() })
+    window.addEventListener('blur', () => { this.aimingRightMouse = false; if (this.mode === 'playing') this.pause() })
+  }
+
+  private applySavedPlayerState(): void {
+    this.player.upgrade = this.save.upgrade
+    if (this.save.inventory) {
+      this.ammo = this.save.inventory.ammo
+      this.player.upgrade = this.save.inventory.sprintTier
+      this.save.upgrade = this.save.inventory.sprintTier
+    }
+    if (this.save.position) {
+      this.player.root.position.set(this.save.position.x, this.save.position.y, this.save.position.z)
+      resolvePlayerCollision(this.player.root.position, this.world.spawn, this.world.colliders)
+    }
+    if (this.save.heat) {
+      this.heat.restoreFromSave(this.save.heat)
+    }
+    this.lastSavedPos.copy(this.player.root.position)
+    this.lastSavedWanted = this.heat.wanted
+    this.lastSavedAmmo = this.ammo
   }
 
   get wanted(): number {
     return this.heat.wanted
   }
 
-  private persist(): void { saveCityProgress(this.save) }
+  private async toggleAuth(): Promise<void> {
+    try {
+      if (this.currentUser) {
+        await signOutPlayer()
+        this.ui.toast('Signed out of Firebase Cloud')
+      } else {
+        await signInWithGoogle()
+      }
+    } catch (error) {
+      this.ui.toast(`Sign-in error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private async handleAuthChange(user: User | null): Promise<void> {
+    this.currentUser = user
+    if (!user) {
+      this.ui.setAuthStatus(null)
+      return
+    }
+    const label = user.displayName || user.email || 'VICE PLAYER'
+    this.ui.setAuthStatus(label)
+    try {
+      const remote = await loadCloudPlayerSave(user.uid)
+      if (remote) {
+        const merged = mergeCitySaves(this.save, remote)
+        Object.assign(this.save, merged)
+        this.applySavedPlayerState()
+        for (const s of this.save.robbedStores) this.robbedStores.add(s)
+        saveCityProgress(this.save)
+        this.ui.toast(`Cloud save synced for ${label}`)
+      } else {
+        this.persist()
+        this.ui.toast(`Cloud save created for ${label}`)
+      }
+    } catch (error) {
+      console.error(error)
+    }
+  }
+
+  private capturePlayerState() {
+    const p = this.player.root.position
+    return {
+      position: {
+        x: Math.round(p.x * 100) / 100,
+        y: Math.round(p.y * 100) / 100,
+        z: Math.round(p.z * 100) / 100,
+      },
+      inventory: {
+        ammo: Math.max(0, Math.floor(this.ammo)),
+        armor: 0,
+        weapon: 'pistol',
+        sprintTier: this.player.upgrade,
+      },
+      heat: this.heat.toSaveState(),
+    }
+  }
+
+  private persist(syncCloud = true): void {
+    const state = this.capturePlayerState()
+    this.save.position = state.position
+    this.save.inventory = state.inventory
+    this.save.heat = state.heat
+    this.lastSavedPos.copy(this.player.root.position)
+    this.lastSavedWanted = this.heat.wanted
+    this.lastSavedAmmo = this.ammo
+    this.saveTimer = 0
+    if (syncCloud) {
+      void persistPlayerState(this.currentUser, state, this.save)
+    } else {
+      saveCityProgress(this.save)
+    }
+  }
 
   start(): void {
     tuning.activate('run')
@@ -180,23 +284,48 @@ export class ViceGame {
     playMissionCard(title); this.ui.toast(this.missions.objective)
   }
 
+  private reportCrime(origin: THREE.Vector3, severity: number, options: { immediate?: boolean; escalateIfEqual?: boolean; toast?: string } = {}): void {
+    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
+    if (policeSee || options.immediate || this.heat.wanted > 0) {
+      const prev = this.heat.wanted
+      const res = this.heat.reportCrime(origin, severity, {
+        immediate: options.immediate || policeSee,
+        policeSeePlayer: policeSee,
+        escalateIfEqual: options.escalateIfEqual,
+      })
+      if (res.escalated || this.heat.wanted > prev) {
+        this.audio.dispatchRadio(this.heat.wanted)
+        this.persist()
+      }
+      return
+    }
+    const witnessStarted = this.life.notifyCrimeToWitnesses(origin, severity)
+    if (witnessStarted) {
+      this.audio.dispatchAlert()
+      this.ui.toast(options.toast ?? 'WITNESS CALLING 911 (3.5s) — INTIMIDATE OR FLEE OUT OF SIGHT!')
+    }
+  }
+
   private fire(): void {
     if (this.shotCooldown > 0 || this.vehicles.active) return
     if (this.ammo <= 0) { this.ui.toast('Out of ammo — press R to reload'); return }
-    this.ammo--; this.shotCooldown = .22; this.audio.shoot()
+    this.ammo--; this.shotCooldown = .22; this.weaponHotTimer = 2.6; this.audio.shoot()
     const start = this.player.root.position.clone().add(new THREE.Vector3(0, 1.65, 0))
     const direction = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize()
     this.muzzleFlash.position.copy(start).addScaledVector(direction, .7); this.muzzleFlash.visible = true; this.flashTime = .08
     const range = worldRayDistance(start, direction, this.world.colliders, 60)
-    const hit = this.life.shoot(start, direction, range) || this.props.shoot(start, direction, range)
+    const hitPerson = this.life.shoot(start, direction, range)
+    const hitProp = this.props.shoot(start, direction, range)
+    const hit = hitPerson || hitProp
     this.life.startle(start)
-    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position)
-    const witnessPresent = this.life.hasWitnessNearby(this.player.root.position)
-    const report = this.heat.reportCrime(this.player.root.position, 1, { immediate: policeSee || hit, policeSeePlayer: policeSee, witnessPresent })
-    if (report.dispatchStarted) {
-      this.audio.dispatchAlert()
-      this.ui.toast('WITNESS SPOTTED CRIME — LEAVE THE AREA')
+    if (this.life.intimidateWitnesses(this.player.root.position, direction, true)) {
+      this.ui.toast('WITNESS INTIMIDATED — 911 CALL CANCELLED')
     }
+    this.reportCrime(this.player.root.position, hitPerson ? 2 : 1, {
+      immediate: hitPerson && this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted),
+      escalateIfEqual: hitPerson,
+    })
+    this.persist(false)
     const end = start.clone().addScaledVector(direction, Math.min(range, hit ? 22 : 55))
     const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, end]), new THREE.LineBasicMaterial({ color: 0xffe4a4, transparent: true, opacity: .9 }))
     this.world.scene.add(line); this.tracers.push({ mesh: line, life: .12 })
@@ -210,8 +339,9 @@ export class ViceGame {
       this.robbedStores.add(store.id)
       this.save.robbedStores = [...this.robbedStores]
       this.save.money += store.reward
-      this.heat.reportCrime(p, 2, { immediate: true, policeSeePlayer: true })
+      this.heat.reportCrime(p, 2, { immediate: true, policeSeePlayer: true, escalateIfEqual: true })
       this.audio.robbery()
+      this.audio.dispatchRadio(this.heat.wanted)
       this.ui.toast(`${store.name} HIT  +$${store.reward.toLocaleString()}  — BREAK SIGHT & MOVE`)
       this.persist()
       return
@@ -233,6 +363,7 @@ export class ViceGame {
   step(dt: number): void {
     this.elapsed += dt
     this.shotCooldown = Math.max(0, this.shotCooldown - dt)
+    this.weaponHotTimer = Math.max(0, this.weaponHotTimer - dt)
     this.hitCooldown = Math.max(0, this.hitCooldown - dt)
     this.rampCooldown = Math.max(0, this.rampCooldown - dt)
 
@@ -271,18 +402,25 @@ export class ViceGame {
           }
           this.heat.onVehicleChanged(null)
           this.player.root.visible = true; this.ui.toast('Exited vehicle')
+          this.persist()
         } else {
           const nearest = this.vehicles.nearest(this.player.root.position, 6)
           if (nearest) {
             this.vehicles.enter(nearest)
             this.player.root.visible = false
             const swapped = this.heat.onVehicleChanged(nearest)
-            this.ui.toast(swapped ? `Driving ${nearest.name} — NEW PLATES COOLING HEAT` : `Driving ${nearest.type}`)
+            if (swapped) {
+              this.ui.toast(`Driving ${nearest.name} — NEW PLATES COOLING HEAT`)
+            } else {
+              this.ui.toast(`Driving ${nearest.type}`)
+              this.reportCrime(this.player.root.position, 1, { toast: 'WITNESS SPOTTED VEHICLE THEFT — STOP THE 911 CALL!' })
+            }
+            this.persist()
           } else this.ui.toast('No vehicle nearby')
         }
       }
       if (this.input.consume('interact')) this.interact()
-      if (this.input.consume('reload')) { this.ammo = 15; this.ui.toast('Pistol reloaded') }
+      if (this.input.consume('reload')) { this.ammo = 15; this.ui.toast('Pistol reloaded'); this.persist() }
       if (this.input.consume('shoot')) this.fire()
       const active = this.vehicles.active
       if (active) {
@@ -294,18 +432,22 @@ export class ViceGame {
           if (ramp) { active.root.position.y = Math.max(active.root.position.y, .24); active.velocity.y = Math.min(9.5, 4.2 + Math.abs(active.speed) * .13); this.rampCooldown = 2; this.ui.toast('STUNT JUMP') }
         }
         this.vehicles.update(dt, { throttle: this.input.move.y, steer: this.input.move.x, handbrake: this.input.held('jump') }, (x, z) => this.world.surfaceAt(x, z))
+        if (this.life.checkSpikeStripHit(active.root.position, this.heat.wanted)) {
+          this.vehicles.puncture(active)
+          this.audio.impact()
+          this.ui.toast('SPIKE STRIP HIT — TIRES PUNCTURED!')
+        }
         const dynHit = this.life.resolveDynamicCollisions(active.root.position, active.velocity, true, active.type === 'motorbike' ? 0.9 : 1.35)
         if (dynHit.impactSpeed > 4) {
           this.vehicles.damage(active, dynHit.impactSpeed * 0.85)
           this.audio.impact()
           if (dynHit.hitRoadblock) {
-            this.heat.reportCrime(active.root.position, 2, { immediate: true, policeSeePlayer: true })
+            this.heat.reportCrime(active.root.position, 3, { immediate: true, policeSeePlayer: true, escalateIfEqual: true })
+            this.audio.dispatchRadio(this.heat.wanted)
             this.ui.toast('SMASHED POLICE ROADBLOCK')
+            this.persist()
           } else if (dynHit.hitTraffic && dynHit.impactSpeed > 8) {
-            this.heat.reportCrime(active.root.position, 1, {
-              policeSeePlayer: this.life.hasPoliceLineOfSight(active.root.position),
-              witnessPresent: this.life.hasWitnessNearby(active.root.position),
-            })
+            this.reportCrime(active.root.position, 1)
           }
         }
         const boundedX = THREE.MathUtils.clamp(active.root.position.x, -378, 368)
@@ -316,11 +458,14 @@ export class ViceGame {
         const turn = Math.atan2(Math.sin(active.heading - this.yaw), Math.cos(active.heading - this.yaw))
         this.yaw += turn * Math.min(1, dt * 1.8)
         this.player.root.position.copy(active.root.position)
-        if (this.props.impact(active.root.position, previousSpeed)) { this.vehicles.damage(active, Math.abs(previousSpeed) * 1.2); this.audio.impact() }
+        if (this.props.impact(active.root.position, previousSpeed)) {
+          this.vehicles.damage(active, Math.abs(previousSpeed) * 1.2)
+          this.audio.impact()
+          if (Math.abs(previousSpeed) > 8) this.reportCrime(active.root.position, 1)
+        }
         const hit = this.life.impact(active.root.position, 1.6, Math.abs(previousSpeed))
         if (hit && Math.abs(active.speed) > 4) {
-          const policeSee = this.life.hasPoliceLineOfSight(active.root.position)
-          this.heat.reportCrime(active.root.position, 1, { immediate: true, policeSeePlayer: policeSee })
+          this.reportCrime(active.root.position, 2, { immediate: true, escalateIfEqual: true })
           this.audio.impact()
         }
       } else {
@@ -334,26 +479,48 @@ export class ViceGame {
         const trafficHit = this.hitCooldown <= 0 ? this.life.hitPlayer(this.player.root.position) : null
         if (trafficHit) { this.player.stagger(trafficHit.direction, trafficHit.force * .65); this.save.health = Math.max(0, this.save.health - trafficHit.force * 1.2); this.hitCooldown = 1; this.audio.impact() }
         this.vehicles.update(dt, { throttle: 0, steer: 0, handbrake: false }, (x, z) => this.world.surfaceAt(x, z))
+        // Weapon aiming / close rush intimidates active 911 witnesses
+        if (this.aimingRightMouse || this.weaponHotTimer > 0 || this.input.held('sprint')) {
+          const aimDir = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize()
+          if (this.life.intimidateWitnesses(this.player.root.position, aimDir, this.aimingRightMouse || this.weaponHotTimer > 0)) {
+            this.ui.toast('WITNESS INTIMIDATED — 911 CALL CANCELLED')
+          }
+        }
       }
       const stuntJump = !!active && active.type !== 'boat' && active.type !== 'helicopter' && active.root.position.y > .1 && active.velocity.y > 0
       const result = this.missions.update(dt, this.player.root.position, !!active, active?.speed ?? 0, stuntJump)
       if (result) {
         this.save.money += result.reward
         if (!this.save.completed.includes(result.id)) this.save.completed.push(result.id)
-        void this.board.complete(result.seconds, !tuning.unranked)
+        void this.board.complete(result.seconds, !tuning.unranked, result.id)
         this.persist()
         this.startCutscene('complete', this.player.root.position, `${result.title} COMPLETE  +$${result.reward.toLocaleString()}`)
       }
-      const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position)
+
+      const witnessEvents = this.life.consumeWitnessEvents()
+      if (witnessEvents.cancelledReason === 'down') {
+        this.ui.toast('WITNESS KNOCKED OUT — 911 REPORT PREVENTED')
+      } else if (witnessEvents.cancelledReason === 'escaped') {
+        this.ui.toast('OUT OF WITNESS SIGHT — 911 CALL ABORTED')
+      }
+      const witnessSync = this.heat.syncWitnesses(witnessEvents.blips, witnessEvents.completedReport)
+      if (witnessSync.dispatchConfirmed) {
+        this.audio.dispatchRadio(this.heat.wanted)
+        this.persist()
+      }
+
+      const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
       const inStealth = this.world.districtAt(this.player.root.position.x, this.player.root.position.z) === 'The Wetlands'
         || this.world.safehouses.some(home => this.player.root.position.distanceTo(home.position) < home.radius + 8)
       const heatStep = this.heat.update(dt, this.player.root.position, policeSee, inStealth)
-      if (heatStep.dispatchConfirmed) {
-        this.audio.dispatchAlert()
-        this.ui.toast('DISPATCH: POLICE UNITS RESPONDING TO REPORT')
+      if (heatStep.dispatchConfirmed || heatStep.reinforcementEscalated) {
+        this.audio.dispatchRadio(this.heat.wanted)
+        this.persist()
       } else if (heatStep.starDropped) {
         this.ui.toast(this.heat.wanted === 0 ? 'HEAT CLEARED — COAST IS CLEAR' : 'HEAT COOLED DOWN')
+        this.persist()
       }
+
       const harm = this.life.getDamage(this.player.root.position, dt, this.heat.wanted)
       if (harm > 0 && this.hitCooldown <= 0) {
         this.save.health = Math.max(0, this.save.health - harm); this.hitCooldown = .35
@@ -364,8 +531,14 @@ export class ViceGame {
         this.save.money = Math.max(0, this.save.money - 250); this.player.root.position.copy(this.world.spawn)
         this.ui.toast('WASTED — $250 hospital fee'); this.persist()
       }
+
+      // Persist position, inventory, and heat whenever game state changes (immediate on heat/ammo change, debounced for position)
       this.saveTimer += dt
-      if (this.saveTimer > 15) { this.saveTimer = 0; this.persist() }
+      const movedDist = this.player.root.position.distanceTo(this.lastSavedPos)
+      const stateChanged = this.heat.wanted !== this.lastSavedWanted || this.ammo !== this.lastSavedAmmo
+      if (stateChanged || (movedDist >= 8 && this.saveTimer >= 3.0) || this.saveTimer >= 12) {
+        this.persist(stateChanged || this.saveTimer >= 6.0)
+      }
     } else {
       this.input.consume('vehicle'); this.input.consume('interact'); this.input.consume('reload'); this.input.consume('shoot'); this.input.consume('jump'); this.input.consume('confirm')
     }
@@ -432,6 +605,8 @@ export class ViceGame {
       safehouses: this.world.safehouses.map(home => ({ x: home.position.x, z: home.position.z })),
       heat: this.heat.getHudState(),
       police: this.life.getPoliceBlips(),
+      policeRadars: this.life.getPoliceRadars(focus, this.heat.wanted),
+      nearestPursuerDist: this.life.nearestPursuerDistance(focus, this.heat.wanted),
     })
   }
 }
