@@ -55,6 +55,16 @@ describe('Vice Bay contracts', () => {
     store.set('vicebay-nights.progress.v1', '{broken')
     expect(loadCitySave().money).toBe(1500)
   })
+  it.each([
+    ['fog', 'overcast'],
+    ['haze', 'overcast'],
+    ['storm', 'rain'],
+    ['night', 'night'],
+    ['unknown', 'sunset'],
+  ])('loads saved weather %s as the supported preset %s', (weather, expected) => {
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ version: 1, weather }) })
+    expect(loadCitySave().weather).toBe(expected)
+  })
   it('stops shots at solid world geometry and checks line-of-sight cover', () => {
     const colliders = [{ center: new THREE.Vector3(0, 2, -10), halfExtents: new THREE.Vector3(3, 2, 2), rotationY: 0, kind: 'building' as const }]
     const start = new THREE.Vector3(0, 1, 0)

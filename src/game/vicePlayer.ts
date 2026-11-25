@@ -73,7 +73,6 @@ export class VicePlayer {
   private grounded = true
   private weaponKey = ''
   private slingKey = ''
-  private masked = false
   private holstered = false
   private tumbleTimer = 0
   private tumbleSpin = 0
@@ -137,7 +136,6 @@ export class VicePlayer {
   }
 
   setMasked(masked: boolean): void {
-    this.masked = masked
     this.maskMesh.visible = masked
     this.sunglassesMesh.visible = !masked
   }

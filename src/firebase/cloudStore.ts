@@ -22,6 +22,7 @@ import {
   sanitizeInventory,
   sanitizePosition,
   sanitizeRpgStats,
+  sanitizeWeather,
   sanitizeWeaponArsenal,
   saveCityProgress,
 } from '../game/saveSystem'
@@ -53,12 +54,6 @@ function sanitizeDisplayName(raw: string | null | undefined, maxLen: number): st
   const cleaned = (raw ?? 'VICE PLAYER').replace(/\s+/g, ' ').trim()
   const safe = cleaned.length > 0 ? cleaned : 'VICE PLAYER'
   return safe.slice(0, maxLen)
-}
-
-function sanitizeWeather(value: unknown): CitySave['weather'] {
-  return value === 'day' || value === 'sunset' || value === 'rain' || value === 'night' || value === 'overcast' || value === 'haze' || value === 'fog' || value === 'storm'
-    ? value
-    : 'sunset'
 }
 
 function sanitizeIdList(value: unknown, maxItems: number): string[] {
