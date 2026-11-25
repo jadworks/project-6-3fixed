@@ -1,4 +1,5 @@
 import type { SanAndreasStatsSave } from './sanAndreasRpg'
+import type { ViceWeather } from './viceWorld'
 import type { AttachmentId, WeaponCategoryId, WeaponSaveState } from './weapons'
 
 export type PlayerPosition = { x: number; y: number; z: number }
@@ -8,8 +9,6 @@ export type PlayerHeatSave = {
   phase: 'clear' | 'witness' | 'pursuit' | 'evading'
   lastKnownPos: { x: number; z: number } | null
 }
-export type WeatherSave = 'day' | 'sunset' | 'rain' | 'night' | 'overcast' | 'haze' | 'fog' | 'storm'
-
 export type CitySave = {
   version: 1
   money: number
@@ -19,7 +18,7 @@ export type CitySave = {
   completed: string[]
   upgrade: number
   muted: boolean
-  weather: WeatherSave
+  weather: ViceWeather
   robbedStores: string[]
   seenIntro?: boolean
   protagonist?: 'jason' | 'lucia'
@@ -158,7 +157,23 @@ export function sanitizeCapturedTurfs(raw: unknown): string[] | undefined {
   return out
 }
 
-const VALID_WEATHERS = new Set<WeatherSave>(['day', 'sunset', 'rain', 'night', 'overcast', 'haze', 'fog', 'storm'])
+export function sanitizeWeather(value: unknown): ViceWeather {
+  switch (value) {
+    case 'day':
+    case 'sunset':
+    case 'rain':
+    case 'night':
+    case 'overcast':
+      return value
+    case 'fog':
+    case 'haze':
+      return 'overcast'
+    case 'storm':
+      return 'rain'
+    default:
+      return 'sunset'
+  }
+}
 
 export function loadCitySave(): CitySave {
   try {
@@ -167,9 +182,6 @@ export function loadCitySave(): CitySave {
     const value = JSON.parse(raw) as Partial<CitySave>
     if (value.version !== 1) return defaults()
     const upgrade = Number.isFinite(value.upgrade) ? Math.min(3, Math.max(0, Math.floor(value.upgrade!))) : 0
-    const weather = typeof value.weather === 'string' && VALID_WEATHERS.has(value.weather as WeatherSave)
-      ? (value.weather as WeatherSave)
-      : 'sunset'
     const result: CitySave = {
       version: 1,
       money: Number.isFinite(value.money) ? Math.max(0, Math.floor(value.money!)) : 1500,
@@ -179,7 +191,7 @@ export function loadCitySave(): CitySave {
       completed: Array.isArray(value.completed) ? value.completed.filter((v): v is string => typeof v === 'string').slice(0, 100) : [],
       upgrade,
       muted: value.muted === true,
-      weather,
+      weather: sanitizeWeather(value.weather),
       robbedStores: Array.isArray(value.robbedStores) ? value.robbedStores.filter((v): v is string => typeof v === 'string').slice(0, 24) : [],
       seenIntro: value.seenIntro === true,
       protagonist: value.protagonist === 'lucia' ? 'lucia' : 'jason',
