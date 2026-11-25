@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { createFacadeMaterial, createRainMaterial, createSkyMaterial, createWaterMaterial, type FacadeControls } from './shaders'
 import { createSignTexture, createSurfaceTexture } from './textures'
 
-export type ViceWeather = 'day' | 'sunset' | 'rain' | 'night'
+export type ViceWeather = 'day' | 'sunset' | 'rain' | 'night' | 'overcast'
 export type ViceSurface = 'asphalt' | 'wet' | 'sand' | 'dirt' | 'water'
 
 /** Optional metadata for a game to create its own physics and interactions. */
@@ -16,6 +16,7 @@ export type Safehouse = { name: string; position: THREE.Vector3; radius: number 
 export type Store = { id: string; name: string; position: THREE.Vector3; radius: number; reward: number }
 export type GymStation = { id: string; name: string; kind: 'bench' | 'bag'; position: THREE.Vector3; radius: number }
 export type FoodStand = { id: string; name: string; position: THREE.Vector3; radius: number; price: number; mealSize: number }
+export type ResprayBay = { id: string; name: string; position: THREE.Vector3; radius: number; price: number }
 export type WorldRamp = { position: THREE.Vector3; width: number; length: number; rise: number; rotationY: number }
 
 type BatchItem = { matrix: THREE.Matrix4; color: THREE.Color }
@@ -31,7 +32,8 @@ const LONG_STREETS = [{ x: 0, width: 20 }, { x: -70, width: 14 }, { x: -130, wid
 const ATMOSPHERES: Record<ViceWeather, Atmosphere> = {
   day: { top: '#5ab6d9', horizon: '#f9d3b9', sun: '#fff1d2', ground: '#786c65', ambient: 1.35, sunlight: 2.35, fogNear: 145, fogFar: 560, night: 0, rain: 0, sunGlow: 0.85 },
   sunset: { top: '#6d5ea5', horizon: '#ff9d7b', sun: '#ffaa6c', ground: '#6f506b', ambient: 1.0, sunlight: 1.95, fogNear: 120, fogFar: 520, night: 0.42, rain: 0, sunGlow: 1.25 },
-  rain: { top: '#688291', horizon: '#a0b3b7', sun: '#cbd6df', ground: '#526265', ambient: 0.92, sunlight: 1.05, fogNear: 80, fogFar: 350, night: 0.22, rain: 1, sunGlow: 0.14 },
+  overcast: { top: '#68737d', horizon: '#9aa4ac', sun: '#cad0d4', ground: '#4a5155', ambient: 0.94, sunlight: 1.02, fogNear: 72, fogFar: 300, night: 0.34, rain: 0.32, sunGlow: 0.08 },
+  rain: { top: '#5a6f7c', horizon: '#8b9ba0', sun: '#cbd6df', ground: '#435053', ambient: 0.86, sunlight: 0.95, fogNear: 74, fogFar: 320, night: 0.32, rain: 1, sunGlow: 0.14 },
   night: { top: '#0e1639', horizon: '#2b3962', sun: '#8eb0ff', ground: '#1e223c', ambient: 0.52, sunlight: 0.78, fogNear: 110, fogFar: 480, night: 1, rain: 0, sunGlow: 0.18 },
 }
 
@@ -120,6 +122,7 @@ export class ViceWorld {
   public readonly stores: Store[] = []
   public readonly gyms: GymStation[] = []
   public readonly foodStands: FoodStand[] = []
+  public readonly resprayBays: ResprayBay[] = []
   public readonly ramps: WorldRamp[] = []
 
   private readonly sun = new THREE.DirectionalLight('#fff0d0', 2.15)
@@ -151,6 +154,7 @@ export class ViceWorld {
   private readonly fronds: InstanceBatch
   private readonly foliage: InstanceBatch
   private readonly asphaltMaterials: THREE.MeshStandardMaterial[] = []
+  private readonly sodiumLights: THREE.PointLight[] = []
   private readonly ponds: { x: number; z: number; rx: number; rz: number }[] = []
   private weather: ViceWeather = 'day'
   private time = 0
@@ -206,6 +210,12 @@ export class ViceWorld {
     }
     this.rain = this.makeRain()
     this.scene.add(this.rain)
+    for (let i = 0; i < 4; i += 1) {
+      const lamp = new THREE.PointLight('#ff9a38', 0, 28, 1.8)
+      lamp.castShadow = false
+      this.scene.add(lamp)
+      this.sodiumLights.push(lamp)
+    }
     this.update(0, this.spawn, 'day')
   }
 
@@ -237,7 +247,7 @@ export class ViceWorld {
     if (this.waterMaterial.uniforms.uSky) colorTo(this.waterMaterial.uniforms.uSky.value as THREE.Color, target.horizon)
     this.skyMaterial.uniforms.uSunStrength.value = THREE.MathUtils.lerp(this.skyMaterial.uniforms.uSunStrength.value as number, target.sunGlow, blend)
     this.rainMaterial.uniforms.uTime.value = this.time
-    this.rain.visible = this.facadeControls.rain.value > 0.08
+    this.rain.visible = weather === 'rain' && this.facadeControls.rain.value > 0.08
     this.rain.position.set(player.x, player.y, player.z)
     this.sky.position.copy(player)
     // Snap directional shadow target to texel grid to eliminate shadow swimming during camera movement.
@@ -252,8 +262,18 @@ export class ViceWorld {
     this.neonPink.emissiveIntensity = neon
     this.neonCyan.emissiveIntensity = neon * 0.9
     for (const material of this.asphaltMaterials) {
-      material.roughness = 0.95 - 0.52 * this.facadeControls.rain.value
-      material.metalness = 0.05 + 0.16 * this.facadeControls.rain.value
+      material.roughness = 0.94 - 0.56 * this.facadeControls.rain.value
+      material.metalness = 0.06 + 0.2 * this.facadeControls.rain.value
+    }
+    // Sodium-vapor orange avenue pools glow dynamically near the player at night / overcast / rain
+    const sodiumIntensity = Math.max(this.facadeControls.night.value * 11, this.facadeControls.rain.value * 4.5)
+    const baseZ = Math.round(player.z / 29) * 29
+    for (let i = 0; i < this.sodiumLights.length; i += 1) {
+      const lamp = this.sodiumLights[i]
+      const side = i % 2 === 0 ? -1 : 1
+      const zOff = (Math.floor(i / 2) - 0.5) * 29
+      lamp.position.set(side * 15.5, 5.8, THREE.MathUtils.clamp(baseZ + zOff, -360, 360))
+      lamp.intensity = sodiumIntensity
     }
     this.cullTimer += step
     if (this.cullTimer >= 0.4) {
@@ -270,7 +290,7 @@ export class ViceWorld {
   public surfaceAt(x: number, z: number): ViceSurface {
     const road = LONG_STREETS.some(street => Math.abs(x - street.x) <= street.width / 2)
       || (x >= -BOUNDS && x <= 50 && CROSS_STREETS.some(street => Math.abs(z - street) <= 7))
-    if (road || (z > 110 && x >= 55 && x <= 85)) return this.weather === 'rain' ? 'wet' : 'asphalt'
+    if (road || (z > 110 && x >= 55 && x <= 85)) return (this.weather === 'rain' || this.weather === 'overcast') ? 'wet' : 'asphalt'
     if ((x >= 60 && x <= 66 && z <= 110) || (x >= 63 && x <= 142 && Math.abs(z + 8) <= 4)) return 'dirt'
     if (x > 85) return 'water'
     if (x >= 55) return 'sand'
@@ -706,22 +726,54 @@ export class ViceWorld {
       this.scene.add(ring)
     }
 
-    // 2 Street Food Vendors (Burger Bay & Taco Tropics)
+    // Street Food Vendors ($12-$15 Burger/Taco + iconic $5 Sidewalk Hotdog Carts)
     const foodSpecs: FoodStand[] = [
       { id: 'burger-bay', name: 'Burger Bay', position: new THREE.Vector3(16, 0, -24), radius: 3.8, price: 15, mealSize: 55 },
       { id: 'taco-tropics', name: 'Taco Tropics', position: new THREE.Vector3(-76, 0, 26), radius: 3.8, price: 12, mealSize: 45 },
+      { id: 'hotdog-boulevard', name: 'Liberty Hotdog Cart', position: new THREE.Vector3(-12.5, 0, 10), radius: 3.2, price: 5, mealSize: 32 },
+      { id: 'hotdog-downtown', name: 'Plaza Hotdog Cart', position: new THREE.Vector3(12.5, 0, -102), radius: 3.2, price: 5, mealSize: 32 },
     ]
     for (const stand of foodSpecs) {
       this.foodStands.push(stand)
       const { x, z } = stand.position
-      this.smallBoxes.add(x, 1.4, z, 3.8, 2.8, 2.6, '#f2e4cc')
-      this.trims.add(x, 2.9, z, 4.2, 0.35, 3.0, '#ff4b98')
-      this.trims.add(x, 0.65, z + 1.45, 3.6, 0.95, 0.35, '#3b4a56')
-      this.pinkLights.add(x, 2.55, z + 1.42, 3.4, 0.18, 0.14, '#ff73b8')
-      this.sign(stand.name.toUpperCase(), x, 3.45, z + 1.36, 3.4, 0)
-      const ring = new THREE.Mesh(new THREE.RingGeometry(1.3, 1.65, 28), new THREE.MeshBasicMaterial({ color: '#77e6e7', side: THREE.DoubleSide, transparent: true, opacity: 0.72 }))
+      if (stand.price === 5) {
+        // Sidewalk pushcart with yellow/red umbrella
+        this.smallBoxes.add(x, 0.72, z, 1.5, 0.95, 1.0, '#d8dfe6')
+        this.trims.add(x, 1.25, z, 1.58, 0.12, 1.08, '#e33b44')
+        this.trims.add(x, 1.9, z, 0.08, 1.4, 0.08, '#c5ccd4')
+        this.trims.add(x, 2.55, z, 1.9, 0.16, 1.9, '#f2c144')
+        const ring = new THREE.Mesh(new THREE.RingGeometry(1.0, 1.25, 24), new THREE.MeshBasicMaterial({ color: '#f6d66d', side: THREE.DoubleSide, transparent: true, opacity: 0.7 }))
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(x, 0.16, z)
+        this.scene.add(ring)
+      } else {
+        this.smallBoxes.add(x, 1.4, z, 3.8, 2.8, 2.6, '#f2e4cc')
+        this.trims.add(x, 2.9, z, 4.2, 0.35, 3.0, '#ff4b98')
+        this.trims.add(x, 0.65, z + 1.45, 3.6, 0.95, 0.35, '#3b4a56')
+        this.pinkLights.add(x, 2.55, z + 1.42, 3.4, 0.18, 0.14, '#ff73b8')
+        this.sign(stand.name.toUpperCase(), x, 3.45, z + 1.36, 3.4, 0)
+        const ring = new THREE.Mesh(new THREE.RingGeometry(1.3, 1.65, 28), new THREE.MeshBasicMaterial({ color: '#77e6e7', side: THREE.DoubleSide, transparent: true, opacity: 0.72 }))
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(x, 0.15, z + 2.2)
+        this.scene.add(ring)
+      }
+    }
+
+    // Pay 'n' Spray Garages ($150 repair, respray & new plate to shed vehicle heat)
+    const bays: ResprayBay[] = [
+      { id: 'spray-downtown', name: "Pay 'n' Spray Downtown", position: new THREE.Vector3(-42, 0, -28), radius: 5.5, price: 150 },
+      { id: 'spray-port', name: "Pay 'n' Spray Portside", position: new THREE.Vector3(38, 0, 118), radius: 5.5, price: 150 },
+    ]
+    for (const bay of bays) {
+      this.resprayBays.push(bay)
+      const { x, z } = bay.position
+      this.addBuilding(x, z - 4.8, 10, 7, 5.2, '#4a555e', false)
+      this.trims.add(x, 5.3, z - 4.8, 10.6, 0.5, 7.6, '#f0b848')
+      this.sign("PAY 'N' SPRAY", x, 4.1, z - 1.15, 7.8, 0, true)
+      this.cyanLights.add(x, 3.2, z - 1.18, 7.5, 0.16, 0.16, '#ffffff')
+      const ring = new THREE.Mesh(new THREE.RingGeometry(2.1, 2.55, 30), new THREE.MeshBasicMaterial({ color: '#ffbd59', side: THREE.DoubleSide, transparent: true, opacity: 0.78 }))
       ring.rotation.x = -Math.PI / 2
-      ring.position.set(x, 0.15, z + 2.2)
+      ring.position.set(x, 0.14, z + 1.2)
       this.scene.add(ring)
     }
   }

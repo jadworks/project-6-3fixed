@@ -219,6 +219,7 @@ export class HeatSystem {
     playerPos: THREE.Vector3,
     policeSeePlayer: boolean,
     inStealthArea: boolean,
+    identityEvasionMult = 1.0,
   ): { starDropped: boolean; dispatchConfirmed: boolean; reinforcementEscalated: boolean } {
     let starDropped = false
     let dispatchConfirmed = false
@@ -300,7 +301,7 @@ export class HeatSystem {
     } else {
       this.phase = 'evading'
       this.reinforcementTimer = Math.max(0, this.reinforcementTimer - dt * 0.5)
-      let drainRate = 1.0
+      let drainRate = Math.max(0.75, identityEvasionMult)
       if (this.vehicleSwapBonusTimer > 0) drainRate *= 2.2
       if (inStealthArea) drainRate *= 1.65
       this.evadeTimer += dt * drainRate

@@ -1,12 +1,23 @@
 import type { HeatHudState } from '../game/heatSystem'
+import type { ApbHudIntel } from '../game/policeKnowledge'
 
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2.4 14.95 8.5 21.7 9.45 16.8 14.2 18 20.9 12 17.7 6 20.9 7.2 14.2 2.3 9.45 9.05 8.5 12 2.4"/></svg>'
 
+export type WantedStateSnapshot = {
+  crimeLevel: number
+  heat?: HeatHudState
+  apb?: ApbHudIntel
+}
+
+export type WantedStateListener = (snapshot: WantedStateSnapshot) => void
+
 /**
  * Top-right GTA-style WantedHUD component:
- * - Renders the 5-star indicator cluster (expanding to a 6th Military Lockdown star at heat 6).
+ * - Positioned in the top-right corner with 5-star indicator (expanding to 6-star Military Lockdown).
  * - Animates state transitions: pulsing bright stars during active pursuit, flashing/fading outline
  *   stars during cooldown/evasion, amber witness alert accent, and radial SVG heat/dispatch ring.
+ * - Includes a reactive state listener (`subscribe` / `setCrimeLevel` / `bindState`) and the
+ *   GTA 6 "APB KNOWN INTEL" badge cluster + expandable 1-line police dispatch ticker.
  */
 export class WantedHUD {
   readonly element: HTMLElement
@@ -16,6 +27,18 @@ export class WantedHUD {
   private readonly heatStatus: HTMLElement | null
   private readonly heatFill: HTMLElement | null
   private readonly heatRing: SVGCircleElement | null
+  private readonly apbWrap: HTMLElement | null
+  private readonly apbFace: HTMLElement | null
+  private readonly apbOutfit: HTMLElement | null
+  private readonly apbWeapon: HTMLElement | null
+  private readonly apbVehicle: HTMLElement | null
+  private readonly apbTicker: HTMLElement | null
+  private readonly listeners = new Set<WantedStateListener>()
+  private crimeLevel = 0
+  private lastHeat?: HeatHudState
+  private lastApb?: ApbHudIntel
+  private tickerExpanded = false
+  private unboundSource?: () => void
 
   constructor(container?: HTMLElement) {
     this.element = document.createElement('div')
@@ -29,6 +52,12 @@ export class WantedHUD {
     this.heatStatus = this.element.querySelector<HTMLElement>('[data-value="heat-status"]')
     this.heatFill = this.element.querySelector<HTMLElement>('[data-heat-fill]')
     this.heatRing = this.element.querySelector<SVGCircleElement>('[data-heat-ring]')
+    this.apbWrap = this.element.querySelector<HTMLElement>('[data-apb-wrap]')
+    this.apbFace = this.element.querySelector<HTMLElement>('[data-apb-face]')
+    this.apbOutfit = this.element.querySelector<HTMLElement>('[data-apb-outfit]')
+    this.apbWeapon = this.element.querySelector<HTMLElement>('[data-apb-weapon]')
+    this.apbVehicle = this.element.querySelector<HTMLElement>('[data-apb-vehicle]')
+    this.apbTicker = this.element.querySelector<HTMLElement>('[data-apb-ticker]')
   }
 
   static markup(): string {
@@ -48,11 +77,62 @@ export class WantedHUD {
           <circle class="vbn-heat-ring-fg" data-heat-ring cx="18" cy="18" r="14"/>
         </svg>
       </div>
+      <div class="vbn-apb-wrap" data-apb-wrap hidden>
+        <div class="vbn-apb-badges">
+          <span class="vbn-apb-tag" data-apb-face>MASKED / UNKNOWN FACE</span>
+          <span class="vbn-apb-tag" data-apb-outfit hidden>OUTFIT CLEARED</span>
+          <span class="vbn-apb-tag is-red" data-apb-weapon hidden>ARMED</span>
+          <span class="vbn-apb-tag" data-apb-vehicle hidden>CLEAN VEHICLE</span>
+        </div>
+        <div class="vbn-apb-ticker" data-apb-ticker hidden>APB: SCANNING…</div>
+      </div>
     `
   }
 
-  update(wantedInput: number, heat?: HeatHudState): void {
+  /** Register a reactive listener invoked whenever the player's crime level changes. */
+  subscribe(listener: WantedStateListener): () => void {
+    this.listeners.add(listener)
+    listener({ crimeLevel: this.crimeLevel, heat: this.lastHeat, apb: this.lastApb })
+    return () => this.listeners.delete(listener)
+  }
+
+  /** Bind WantedHUD directly to an external reactive crime-level state store. */
+  bindState(source: { subscribe: (fn: WantedStateListener) => () => void }): () => void {
+    this.unboundSource?.()
+    this.unboundSource = source.subscribe(snapshot => {
+      this.setCrimeLevel(snapshot.crimeLevel, snapshot.heat, snapshot.apb)
+    })
+    return () => {
+      this.unboundSource?.()
+      this.unboundSource = undefined
+    }
+  }
+
+  getCrimeLevel(): number {
+    return this.crimeLevel
+  }
+
+  setTickerExpanded(expanded: boolean): void {
+    this.tickerExpanded = expanded
+    if (this.apbTicker) {
+      this.apbTicker.hidden = !expanded || (!this.lastApb && this.crimeLevel <= 0)
+    }
+  }
+
+  setCrimeLevel(wantedInput: number, heat?: HeatHudState, apb?: ApbHudIntel): void {
+    const prevLevel = this.crimeLevel
+    this.update(wantedInput, heat, apb)
+    if (this.crimeLevel !== prevLevel) {
+      const snap: WantedStateSnapshot = { crimeLevel: this.crimeLevel, heat, apb }
+      for (const listener of this.listeners) listener(snap)
+    }
+  }
+
+  update(wantedInput: number, heat?: HeatHudState, apb?: ApbHudIntel): void {
     const wanted = Math.max(0, Math.min(6, Math.floor(Number.isFinite(wantedInput) ? wantedInput : 0)))
+    this.crimeLevel = wanted
+    this.lastHeat = heat
+    this.lastApb = apb
     const maxDisplay = wanted >= 6 ? 6 : 5
 
     for (let i = 0; i < this.segments.length; i += 1) {
@@ -104,9 +184,48 @@ export class WantedHUD {
         }
       }
     }
+
+    if (this.apbWrap) {
+      const showApb = Boolean(
+        apb && (wanted > 0 || apb.faceIdentified || apb.outfitLogged || apb.outfitCleared || apb.vehicleApb || apb.cleanVehicle || apb.masked || this.tickerExpanded),
+      )
+      this.apbWrap.hidden = !showApb
+      if (apb && showApb) {
+        if (this.apbFace) {
+          this.apbFace.textContent = apb.faceIdentified ? 'FACE ID\'D' : apb.masked ? 'MASKED / UNKNOWN' : 'FACE UNKNOWN'
+          this.apbFace.className = `vbn-apb-tag ${apb.faceIdentified ? 'is-red' : 'is-clear'}`
+        }
+        if (this.apbOutfit) {
+          const showOutfit = apb.outfitLogged || apb.outfitCleared
+          this.apbOutfit.hidden = !showOutfit
+          if (showOutfit) {
+            this.apbOutfit.textContent = apb.outfitLogged ? 'OUTFIT LOGGED' : 'OUTFIT CLEARED'
+            this.apbOutfit.className = `vbn-apb-tag ${apb.outfitLogged ? 'is-amber' : 'is-clear'}`
+          }
+        }
+        if (this.apbWeapon) {
+          this.apbWeapon.hidden = !apb.armedClass
+          if (apb.armedClass) this.apbWeapon.textContent = `ARMED: ${apb.armedClass}`
+        }
+        if (this.apbVehicle) {
+          const showVeh = apb.vehicleApb || apb.cleanVehicle
+          this.apbVehicle.hidden = !showVeh
+          if (showVeh) {
+            this.apbVehicle.textContent = apb.vehicleApb ? `PLATE APB: ${apb.plateNumber ?? ''}` : 'CLEAN VEHICLE'
+            this.apbVehicle.className = `vbn-apb-tag ${apb.vehicleApb ? 'is-amber' : 'is-clear'}`
+          }
+        }
+        if (this.apbTicker) {
+          this.apbTicker.hidden = !this.tickerExpanded && !inPursuit
+          this.apbTicker.textContent = apb.tickerLine
+        }
+      }
+    }
   }
 
   dispose(): void {
+    this.unboundSource?.()
+    this.listeners.clear()
     this.element.remove()
   }
 }

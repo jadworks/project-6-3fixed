@@ -8,17 +8,27 @@ export type PlayerHeatSave = {
   phase: 'clear' | 'witness' | 'pursuit' | 'evading'
   lastKnownPos: { x: number; z: number } | null
 }
+export type WeatherSave = 'day' | 'sunset' | 'rain' | 'night' | 'overcast' | 'haze' | 'fog' | 'storm'
 
 export type CitySave = {
   version: 1
   money: number
+  bankBalance?: number
+  uncleanedLoot?: number
   health: number
   completed: string[]
   upgrade: number
   muted: boolean
-  weather: 'day' | 'sunset' | 'rain' | 'night'
+  weather: WeatherSave
   robbedStores: string[]
   seenIntro?: boolean
+  protagonist?: 'jason' | 'lucia'
+  partnerBond?: number
+  conductScore?: number
+  fuelEnabled?: boolean
+  trunkWeapons?: string[]
+  tattoos?: string[]
+  hairstyle?: string
   position?: PlayerPosition
   inventory?: PlayerInventory
   heat?: PlayerHeatSave
@@ -28,7 +38,24 @@ export type CitySave = {
 }
 
 const KEY = 'vicebay-nights.progress.v1'
-const defaults = (): CitySave => ({ version: 1, money: 1500, health: 100, completed: [], upgrade: 0, muted: false, weather: 'sunset', robbedStores: [], seenIntro: false })
+const defaults = (): CitySave => ({
+  version: 1,
+  money: 1500,
+  bankBalance: 2500,
+  uncleanedLoot: 0,
+  health: 100,
+  completed: [],
+  upgrade: 0,
+  muted: false,
+  weather: 'sunset',
+  robbedStores: [],
+  seenIntro: false,
+  protagonist: 'jason',
+  partnerBond: 32,
+  conductScore: 0,
+  fuelEnabled: true,
+  trunkWeapons: ['carbine', 'pump_shotgun'],
+})
 
 function clampNum(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
@@ -131,6 +158,8 @@ export function sanitizeCapturedTurfs(raw: unknown): string[] | undefined {
   return out
 }
 
+const VALID_WEATHERS = new Set<WeatherSave>(['day', 'sunset', 'rain', 'night', 'overcast', 'haze', 'fog', 'storm'])
+
 export function loadCitySave(): CitySave {
   try {
     const raw = localStorage.getItem(KEY)
@@ -138,16 +167,30 @@ export function loadCitySave(): CitySave {
     const value = JSON.parse(raw) as Partial<CitySave>
     if (value.version !== 1) return defaults()
     const upgrade = Number.isFinite(value.upgrade) ? Math.min(3, Math.max(0, Math.floor(value.upgrade!))) : 0
+    const weather = typeof value.weather === 'string' && VALID_WEATHERS.has(value.weather as WeatherSave)
+      ? (value.weather as WeatherSave)
+      : 'sunset'
     const result: CitySave = {
       version: 1,
       money: Number.isFinite(value.money) ? Math.max(0, Math.floor(value.money!)) : 1500,
+      bankBalance: Number.isFinite(value.bankBalance) ? Math.max(0, Math.floor(value.bankBalance!)) : 2500,
+      uncleanedLoot: Number.isFinite(value.uncleanedLoot) ? Math.max(0, Math.floor(value.uncleanedLoot!)) : 0,
       health: Number.isFinite(value.health) ? Math.min(100, Math.max(0, value.health!)) : 100,
       completed: Array.isArray(value.completed) ? value.completed.filter((v): v is string => typeof v === 'string').slice(0, 100) : [],
       upgrade,
       muted: value.muted === true,
-      weather: value.weather === 'day' || value.weather === 'sunset' || value.weather === 'rain' || value.weather === 'night' ? value.weather : 'sunset',
-      robbedStores: Array.isArray(value.robbedStores) ? value.robbedStores.filter((v): v is string => typeof v === 'string').slice(0, 5) : [],
+      weather,
+      robbedStores: Array.isArray(value.robbedStores) ? value.robbedStores.filter((v): v is string => typeof v === 'string').slice(0, 24) : [],
       seenIntro: value.seenIntro === true,
+      protagonist: value.protagonist === 'lucia' ? 'lucia' : 'jason',
+      partnerBond: Number.isFinite(value.partnerBond) ? clampNum(value.partnerBond, 0, 100, 32) : 32,
+      conductScore: Number.isFinite(value.conductScore) ? clampNum(value.conductScore, -100, 100, 0) : 0,
+      fuelEnabled: value.fuelEnabled !== false,
+      trunkWeapons: Array.isArray(value.trunkWeapons)
+        ? value.trunkWeapons.filter((v): v is string => typeof v === 'string').slice(0, 16)
+        : ['carbine', 'pump_shotgun'],
+      tattoos: Array.isArray(value.tattoos) ? value.tattoos.filter((v): v is string => typeof v === 'string').slice(0, 10) : [],
+      hairstyle: typeof value.hairstyle === 'string' ? value.hairstyle.slice(0, 24) : 'Default Cut',
     }
     const position = sanitizePosition(value.position)
     const inventory = sanitizeInventory(value.inventory, upgrade)

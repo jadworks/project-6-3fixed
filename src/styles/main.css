@@ -406,6 +406,233 @@ body.has-touch .hint.is-active { transform: translate(-50%, 0); }
 @keyframes hurt { from { opacity: 1; } }
 @keyframes banner { 0% { opacity: 0; transform: scale(1.4); } 12% { opacity: 1; transform: scale(1); } 80% { opacity: 1; } 100% { opacity: 0; transform: translateY(-20px); } }
 
+/* ─── Animated Loading Screen (.vbn-loader) ─────────────────────────────── */
+.vbn-loader {
+  --load-accent: #ff4b98;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: max(22px, env(safe-area-inset-top)) max(26px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(26px, env(safe-area-inset-left));
+  background: #070910;
+  color: #f8f2e9;
+  overflow: hidden;
+  pointer-events: auto;
+  transition: opacity 0.44s ease, transform 0.44s ease;
+}
+.vbn-loader.is-done {
+  opacity: 0;
+  transform: scale(1.03);
+  pointer-events: none;
+}
+.vbn-loader-backdrop {
+  position: absolute;
+  inset: -6%;
+  z-index: 0;
+  transition: background 0.9s ease;
+  animation: vbnTitlePulse 7s ease-in-out infinite alternate;
+}
+.vbn-loader-grid {
+  position: absolute;
+  inset: 42% -20% -25%;
+  z-index: 1;
+  background-image:
+    linear-gradient(to right, rgba(119, 230, 231, 0.14) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 75, 152, 0.14) 1px, transparent 1px);
+  background-size: 46px 46px;
+  transform: perspective(460px) rotateX(66deg);
+  transform-origin: center top;
+  opacity: 0.48;
+  animation: vbnGridMove 3.2s linear infinite;
+}
+.vbn-loader-skyline {
+  position: absolute;
+  left: -4%;
+  right: -4%;
+  bottom: 0;
+  width: 108%;
+  height: 76%;
+  z-index: 2;
+  pointer-events: none;
+}
+.vbn-loader-city-far {
+  animation: vbnSkyPan 16s ease-in-out infinite alternate;
+}
+.vbn-loader-city-near {
+  animation: vbnSkyPan 11s ease-in-out infinite alternate-reverse;
+}
+.vbn-loader-beam {
+  transform-box: fill-box;
+  transform-origin: 820px 40px;
+  animation: vbnSearchBeam 5.4s ease-in-out infinite alternate;
+}
+.vbn-loader-neon {
+  animation: vbnNeonPulse 2.4s ease-in-out infinite;
+}
+.vbn-loader-top,
+.vbn-loader-center,
+.vbn-loader-foot {
+  position: relative;
+  z-index: 4;
+}
+.vbn-loader-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.vbn-loader-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  color: #cfe6ea;
+}
+.vbn-loader-center {
+  max-width: min(760px, 92vw);
+  margin: auto 0;
+}
+.vbn-loader-kicker {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  transition: color 0.35s ease;
+}
+.vbn-loader-title {
+  margin: 0;
+  font-family: Impact, 'Arial Narrow', var(--display);
+  font-style: italic;
+  font-size: clamp(44px, 8vw, 96px);
+  line-height: 0.92;
+  letter-spacing: -0.02em;
+  color: #fff9ef;
+  text-shadow: 0 8px 28px rgba(0, 0, 0, 0.72);
+}
+.vbn-loader-sub {
+  margin: 12px 0 0;
+  font-size: clamp(12px, 1.8vw, 16px);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: #cdd8dd;
+}
+.vbn-loader-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr);
+  gap: 20px;
+  align-items: end;
+}
+.vbn-loader-tip-box {
+  padding-left: 14px;
+  border-left: 3px solid var(--load-accent);
+}
+.vbn-loader-tip-box span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  color: #8eb0b8;
+}
+.vbn-loader-tip-box strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #f6f1e8;
+  line-height: 1.4;
+}
+.vbn-loader-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vbn-loader-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.vbn-loader-meta > div {
+  flex: 1;
+  min-width: 0;
+}
+.vbn-loader-meta strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  color: #fff8ee;
+}
+.vbn-loader-meta small {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: #9cb0b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vbn-loader-meta em {
+  font-style: normal;
+  font-size: 15px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: var(--load-accent);
+}
+.vbn-loader-spinner {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--load-accent);
+  border-right-color: #77e6e7;
+  animation: vbnLoaderSpin 0.8s linear infinite;
+}
+.vbn-loader-track {
+  width: 100%;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.vbn-loader-track i {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--load-accent), #77e6e7, #f6d66d);
+  box-shadow: 0 0 12px var(--load-accent);
+}
+
+@keyframes vbnSkyPan {
+  0% { transform: translateX(-18px); }
+  100% { transform: translateX(18px); }
+}
+@keyframes vbnSearchBeam {
+  0% { transform: rotate(-18deg); opacity: 0.75; }
+  50% { opacity: 1; }
+  100% { transform: rotate(16deg); opacity: 0.78; }
+}
+@keyframes vbnNeonPulse {
+  0%, 100% { opacity: 0.95; }
+  50% { opacity: 0.5; }
+}
+@keyframes vbnGridMove {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 46px; }
+}
+@keyframes vbnLoaderSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes vbnTitlePulse {
+  0% { transform: scale(1) translateY(0); }
+  100% { transform: scale(1.04) translateY(-1%); }
+}
+
 @media (max-width: 720px), (max-height: 520px) {
   .btn { min-width: 220px; padding: 12px 24px; font-size: 18px; }
   .hud-cores b { font-size: 26px; }
@@ -414,6 +641,7 @@ body.has-touch .hint.is-active { transform: translate(-50%, 0); }
   .bottom-bar small { display: none; }
   .modal { padding: 22px 20px 24px; gap: 16px; }
   .hud-combo b { font-size: 40px; }
+  .vbn-loader-foot { grid-template-columns: 1fr; gap: 14px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

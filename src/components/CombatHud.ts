@@ -108,7 +108,7 @@ export class CombatHud {
         this.callbacks.toggleAttachment(attBtn.dataset.wheelAtt as AttachmentId)
         return
       }
-      if (target.closest('[data-wheel-close]')) this.callbacks.closeWheel()
+      if (target.closest('[data-wheel-close]') || target === this.wheelEl) this.callbacks.closeWheel()
     })
 
     this.statsEl.addEventListener('click', ev => {
@@ -116,6 +116,19 @@ export class CombatHud {
         this.callbacks.closeStats()
       }
     })
+  }
+
+  /** Map a controller analog stick vector (x, y) to one of the 8 radial weapon sectors. */
+  selectSectorByStick(x: number, y: number): boolean {
+    if (Math.hypot(x, y) < 0.45) return false
+    // Screen-aligned clockwise angle from top (0 deg = up / Sector 0)
+    const angleDeg = ((Math.atan2(x, y) * 180) / Math.PI + 360) % 360
+    const sector = Math.floor(((angleDeg + 22.5) % 360) / 45)
+    if (sector !== this.lastSector) {
+      this.callbacks.selectSector(sector, false)
+      return true
+    }
+    return false
   }
 
   private buildWheelMarkup(): string {

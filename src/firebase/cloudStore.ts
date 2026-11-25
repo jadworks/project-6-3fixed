@@ -56,7 +56,9 @@ function sanitizeDisplayName(raw: string | null | undefined, maxLen: number): st
 }
 
 function sanitizeWeather(value: unknown): CitySave['weather'] {
-  return value === 'day' || value === 'sunset' || value === 'rain' || value === 'night' ? value : 'sunset'
+  return value === 'day' || value === 'sunset' || value === 'rain' || value === 'night' || value === 'overcast' || value === 'haze' || value === 'fog' || value === 'storm'
+    ? value
+    : 'sunset'
 }
 
 function sanitizeIdList(value: unknown, maxItems: number): string[] {
@@ -73,11 +75,13 @@ function sanitizeIdList(value: unknown, maxItems: number): string[] {
 
 export function mergeCitySaves(local: CitySave, remote: Partial<CitySave>): CitySave {
   const completed = sanitizeIdList([...local.completed, ...(remote.completed ?? [])], 20)
-  const robbedStores = sanitizeIdList([...local.robbedStores, ...(remote.robbedStores ?? [])], 10)
+  const robbedStores = sanitizeIdList([...local.robbedStores, ...(remote.robbedStores ?? [])], 24)
   const upgrade = Math.max(local.upgrade, Number.isFinite(remote.upgrade) ? Math.min(3, Math.max(0, Math.floor(remote.upgrade!))) : 0)
   const merged: CitySave = {
     version: 1,
     money: Math.max(local.money, Number.isFinite(remote.money) ? Math.min(1_000_000_000, Math.max(0, Math.floor(remote.money!))) : 0),
+    bankBalance: Math.max(local.bankBalance ?? 2500, Number.isFinite(remote.bankBalance) ? Math.min(1_000_000_000, Math.max(0, Math.floor(remote.bankBalance!))) : 0),
+    uncleanedLoot: Math.max(local.uncleanedLoot ?? 0, Number.isFinite(remote.uncleanedLoot) ? Math.min(1_000_000_000, Math.max(0, Math.floor(remote.uncleanedLoot!))) : 0),
     health: Number.isFinite(remote.health) ? Math.min(100, Math.max(0, remote.health!)) : local.health,
     completed,
     upgrade,
@@ -85,6 +89,11 @@ export function mergeCitySaves(local: CitySave, remote: Partial<CitySave>): City
     weather: sanitizeWeather(remote.weather ?? local.weather),
     robbedStores,
     seenIntro: Boolean(local.seenIntro || remote.seenIntro),
+    protagonist: remote.protagonist === 'lucia' ? 'lucia' : (local.protagonist ?? 'jason'),
+    partnerBond: Math.max(local.partnerBond ?? 32, Number.isFinite(remote.partnerBond) ? Math.min(100, Math.max(0, remote.partnerBond!)) : 0),
+    conductScore: typeof remote.conductScore === 'number' && Number.isFinite(remote.conductScore) ? Math.min(100, Math.max(-100, remote.conductScore)) : (local.conductScore ?? 0),
+    fuelEnabled: remote.fuelEnabled !== undefined ? Boolean(remote.fuelEnabled) : (local.fuelEnabled ?? true),
+    trunkWeapons: local.trunkWeapons ?? remote.trunkWeapons ?? ['carbine', 'pump_shotgun'],
   }
   const position = sanitizePosition(remote.position) ?? sanitizePosition(local.position)
   const inventory = sanitizeInventory(remote.inventory, upgrade) ?? sanitizeInventory(local.inventory, upgrade)
@@ -112,13 +121,18 @@ export async function loadCloudPlayerSave(uid: string): Promise<Partial<CitySave
     const parsed: Partial<CitySave> = {
       version: 1,
       money: typeof data.money === 'number' && Number.isFinite(data.money) ? Math.max(0, Math.floor(data.money)) : 1500,
+      bankBalance: typeof data.bankBalance === 'number' && Number.isFinite(data.bankBalance) ? Math.max(0, Math.floor(data.bankBalance)) : 2500,
+      uncleanedLoot: typeof data.uncleanedLoot === 'number' && Number.isFinite(data.uncleanedLoot) ? Math.max(0, Math.floor(data.uncleanedLoot)) : 0,
       health: typeof data.health === 'number' && Number.isFinite(data.health) ? Math.min(100, Math.max(0, data.health)) : 100,
       completed: sanitizeIdList(data.completed, 20),
       upgrade,
       muted: data.muted === true,
       weather: sanitizeWeather(data.weather),
-      robbedStores: sanitizeIdList(data.robbedStores, 10),
+      robbedStores: sanitizeIdList(data.robbedStores, 24),
       seenIntro: data.seenIntro === true,
+      protagonist: data.protagonist === 'lucia' ? 'lucia' : 'jason',
+      partnerBond: typeof data.partnerBond === 'number' && Number.isFinite(data.partnerBond) ? Math.min(100, Math.max(0, data.partnerBond)) : 32,
+      conductScore: typeof data.conductScore === 'number' && Number.isFinite(data.conductScore) ? Math.min(100, Math.max(-100, data.conductScore)) : 0,
     }
     const position = sanitizePosition(data.position)
     const inventory = sanitizeInventory(data.inventory, upgrade)
@@ -153,13 +167,18 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
     uid: user.uid,
     displayName: sanitizeDisplayName(user.displayName, 60),
     money: Math.min(1_000_000_000, Math.max(0, Math.floor(Number.isFinite(save.money) ? save.money : 1500))),
+    bankBalance: Math.min(1_000_000_000, Math.max(0, Math.floor(Number.isFinite(save.bankBalance) ? save.bankBalance! : 2500))),
+    uncleanedLoot: Math.min(1_000_000_000, Math.max(0, Math.floor(Number.isFinite(save.uncleanedLoot) ? save.uncleanedLoot! : 0))),
     health: Math.min(100, Math.max(0, Number.isFinite(save.health) ? save.health : 100)),
     completed: sanitizeIdList(save.completed, 20),
     upgrade,
     muted: Boolean(save.muted),
     weather: sanitizeWeather(save.weather),
-    robbedStores: sanitizeIdList(save.robbedStores, 10),
+    robbedStores: sanitizeIdList(save.robbedStores, 24),
     seenIntro: Boolean(save.seenIntro),
+    protagonist: save.protagonist === 'lucia' ? 'lucia' : 'jason',
+    partnerBond: Math.min(100, Math.max(0, Number.isFinite(save.partnerBond) ? save.partnerBond! : 32)),
+    conductScore: Math.min(100, Math.max(-100, Number.isFinite(save.conductScore) ? save.conductScore! : 0)),
   }
   if (position) payload.position = position
   if (inventory) payload.inventory = inventory

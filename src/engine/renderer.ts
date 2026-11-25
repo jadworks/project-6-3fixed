@@ -140,4 +140,14 @@ export class Renderer {
     if (composer) composer.render()
     else this.gl.render(scene, camera)
   }
+
+  /** Pre-compile all materials/shaders into WebGL during the loading screen to eliminate first-frame stutter. */
+  precompile(scene: THREE.Scene, camera: THREE.PerspectiveCamera): void {
+    try {
+      this.gl.compile(scene, camera)
+      this.render(scene, camera)
+    } catch {
+      // Safe fallback in headless/mocked environments
+    }
+  }
 }

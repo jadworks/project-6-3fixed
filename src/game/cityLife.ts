@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import type { WorldCollider } from './viceWorld'
 import { hasLineOfSight, worldRayDistance } from './worldCollision'
-import { WITNESS_CALL_SECONDS, WITNESS_RADIUS, WitnessManager } from './witnessManager'
+import { WITNESS_CALL_SECONDS, WITNESS_RADIUS, WitnessManager, type WitnessObservation } from './witnessManager'
+import { applyRagdollImpulse, createRagdollRig, stepRagdoll, type RagdollHitZone, type RagdollRig } from './ragdoll'
 
 /**
  * Lightweight city-life simulation for a flat, y=0 city. Integration:
@@ -41,7 +42,7 @@ export type PoliceRadarUnit = {
 
 export type WitnessEventState = {
   blips: { x: number; z: number; state: 'shocked' | 'reporting'; progress: number }[]
-  completedReport: { x: number; z: number; severity: number } | null
+  completedReport: { x: number; z: number; severity: number; observation?: WitnessObservation } | null
   cancelledReason: 'intimidated' | 'down' | 'escaped' | null
 }
 
@@ -91,6 +92,9 @@ type Pedestrian = {
   reportSeverity: number
   reportOrigin: THREE.Vector3
   lostLosTimer: number
+  ragdoll: RagdollRig
+  droppedWeapon?: THREE.Mesh
+  disarmedTimer: number
 }
 
 type Vehicle = {
@@ -198,8 +202,20 @@ export class CityLife {
   private randomState = 0x765ba9
   private readonly color = new THREE.Color()
   readonly witnessManager = new WitnessManager(WITNESS_RADIUS, WITNESS_CALL_SECONDS)
-  private pendingCompletedReport: { x: number; z: number; severity: number } | null = null
+  private pendingCompletedReport: { x: number; z: number; severity: number; observation?: WitnessObservation } | null = null
   private pendingCancelReason: 'intimidated' | 'down' | 'escaped' | null = null
+  private readonly serviceUnits: Array<{
+    kind: 'ambulance' | 'fire' | 'taxi' | 'arms_van'
+    root: THREE.Group
+    red?: THREE.Mesh
+    blue?: THREE.Mesh
+    active: boolean
+    timer: number
+    target: THREE.Vector3
+    arrived: boolean
+    rideSpeed?: number
+  }> = []
+  private prevPursuerDist = Infinity
 
   constructor(scene: THREE.Scene) {
     this.group.name = 'City life'
@@ -215,7 +231,7 @@ export class CityLife {
     }
     for (let i = 0; i < MAX_OFFICERS; i += 1) this.officers.push(this.makePerson(true, i))
     this.witnessManager.on('dispatch', ev => {
-      this.pendingCompletedReport = { x: ev.x, z: ev.z, severity: ev.severity }
+      this.pendingCompletedReport = { x: ev.x, z: ev.z, severity: ev.severity, observation: ev.observation }
     })
     this.witnessManager.on('cancelled', ev => {
       this.pendingCancelReason = ev.reason
@@ -269,11 +285,11 @@ export class CityLife {
    * Alert civilians within 45m LOS of a crime: closest candidate enters SHOCKED -> REPORTING (3.5s 911 call),
    * while bystanders flee. Returns true if at least one witness began reporting.
    */
-  notifyCrimeToWitnesses(crimeOrigin: THREE.Vector3, severity = 1): boolean {
+  notifyCrimeToWitnesses(crimeOrigin: THREE.Vector3, severity = 1, observation?: Partial<WitnessObservation>): boolean {
     for (const person of this.people) {
       this.witnessManager.syncActorPose(person.id, person.root.position, person.active, person.down)
     }
-    const result = this.witnessManager.notifyCrime(crimeOrigin, severity)
+    const result = this.witnessManager.notifyCrime(crimeOrigin, severity, WITNESS_RADIUS, observation)
     if (!result.started) return false
     for (const person of this.people) {
       const actor = this.witnessManager.getActor(person.id)
@@ -459,6 +475,134 @@ export class CityLife {
     return Number.isFinite(minSq) ? Math.sqrt(minSq) : Infinity
   }
 
+  /** Nearest active police pursuer distance and closing rate (m/s) for Doppler siren shifting. */
+  getNearestPursuerKinematics(playerPos: THREE.Vector3, wanted: number, dt = 1 / 60): { distance: number; approachSpeed: number } {
+    const distance = this.nearestPursuerDistance(playerPos, wanted)
+    if (!Number.isFinite(distance) || distance === Infinity) {
+      this.prevPursuerDist = Infinity
+      return { distance: Infinity, approachSpeed: 0 }
+    }
+    const prev = this.prevPursuerDist
+    this.prevPursuerDist = distance
+    const approachSpeed = Number.isFinite(prev) ? THREE.MathUtils.clamp((prev - distance) / Math.max(0.01, dt), -35, 35) : 0
+    return { distance, approachSpeed }
+  }
+
+  /** Dispatch 911 Ambulance / Firetruck / Roman Cab / Little Jacob arms van near player position. */
+  summonServiceVehicle(kind: 'ambulance' | 'fire' | 'taxi' | 'arms_van', targetPos: THREE.Vector3): { x: number; z: number } {
+    let unit = this.serviceUnits.find(u => u.kind === kind)
+    if (!unit) {
+      const root = new THREE.Group()
+      root.name = `Dispatched ${kind}`
+      let red: THREE.Mesh | undefined
+      let blue: THREE.Mesh | undefined
+      if (kind === 'ambulance') {
+        this.box(root, '#f4f7f8', 0, 1.05, 0, 2.25, 1.45, 4.7)
+        this.box(root, '#e5394d', 0, 1.0, 0, 2.28, 0.25, 4.72)
+        red = this.box(root, '#ff3f58', -0.5, 1.9, 1.3, 0.35, 0.2, 0.25, true)
+        blue = this.box(root, '#ffffff', 0.5, 1.9, 1.3, 0.35, 0.2, 0.25, true)
+      } else if (kind === 'fire') {
+        this.box(root, '#c82934', 0, 1.25, 0, 2.45, 1.75, 5.8)
+        this.box(root, '#d8e0e6', 0, 2.22, -0.3, 0.9, 0.22, 3.8)
+        red = this.box(root, '#ff3f58', -0.6, 2.25, 2.1, 0.4, 0.22, 0.25, true)
+        blue = this.box(root, '#ffb84d', 0.6, 2.25, 2.1, 0.4, 0.22, 0.25, true)
+      } else if (kind === 'taxi') {
+        this.box(root, '#f2b824', 0, 0.68, 0, 2.02, 0.68, 4.15)
+        this.box(root, '#f2b824', 0, 1.2, -0.15, 1.66, 0.54, 2.0)
+        red = this.box(root, '#fff29c', 0, 1.56, 0.05, 0.55, 0.18, 0.26, true)
+      } else {
+        this.box(root, '#2f353b', 0, 0.96, 0, 2.2, 1.25, 4.55)
+        this.box(root, '#1d2226', 0, 0.85, -2.3, 1.85, 0.9, 0.14)
+        blue = this.box(root, '#77e6e7', 0, 1.68, -1.8, 0.5, 0.14, 0.22, true)
+      }
+      for (const x of [-1.06, 1.06]) for (const z of [-1.45, 1.45]) {
+        this.box(root, '#1b1e23', x, 0.4, z, 0.24, 0.78, 0.78)
+      }
+      this.group.add(root)
+      unit = { kind, root, red, blue, active: true, timer: 42, target: new THREE.Vector3(), arrived: false }
+      this.serviceUnits.push(unit)
+    }
+    const streetX = Math.abs(targetPos.x) < 35 ? (targetPos.x >= 0 ? 7.2 : -7.2) : THREE.MathUtils.clamp(targetPos.x, -280, 45)
+    const destZ = THREE.MathUtils.clamp(targetPos.z + 6, -340, 340)
+    const startZ = THREE.MathUtils.clamp(destZ - 38, -360, 360)
+    unit.active = true
+    unit.arrived = false
+    unit.timer = 45
+    unit.target.set(streetX, 0.04, destZ)
+    unit.root.visible = true
+    unit.root.position.set(streetX, 0.04, startZ)
+    unit.root.rotation.y = destZ >= startZ ? 0 : Math.PI
+    return { x: streetX, z: destZ }
+  }
+
+  /** Nearest active dispatched service vehicle or yellow traffic cab within range. */
+  getServiceUnitState(kind: 'ambulance' | 'fire' | 'taxi' | 'arms_van', playerPos: THREE.Vector3, maxDist = 7.5): { position: THREE.Vector3; arrived: boolean; distance: number } | null {
+    const unit = this.serviceUnits.find(u => u.kind === kind && u.active)
+    if (!unit) return null
+    const distance = Math.hypot(unit.root.position.x - playerPos.x, unit.root.position.z - playerPos.z)
+    if (distance > maxDist && !unit.arrived) return null
+    return { position: unit.root.position, arrived: unit.arrived, distance }
+  }
+
+  consumeServiceUnit(kind: 'ambulance' | 'fire' | 'taxi' | 'arms_van'): void {
+    const unit = this.serviceUnits.find(u => u.kind === kind)
+    if (!unit) return
+    unit.active = false
+    unit.root.visible = false
+  }
+
+  /** Non-mutating check whether a Yellow Cab or dispatched Roman taxi is within hailing range. */
+  isCabNearby(playerPos: THREE.Vector3, maxDist = 7.5): boolean {
+    const dispatched = this.serviceUnits.find(u => u.kind === 'taxi' && u.active)
+    if (dispatched && Math.hypot(dispatched.root.position.x - playerPos.x, dispatched.root.position.z - playerPos.z) <= maxDist) {
+      return true
+    }
+    return this.vehicles.some(
+      car => !car.patrol && car.root.visible && car.root.name === 'Yellow Cab'
+        && Math.hypot(car.root.position.x - playerPos.x, car.root.position.z - playerPos.z) <= maxDist,
+    )
+  }
+
+  /** Hail nearest passing yellow cab or Roman Cab unit within range; returns cab world pose. */
+  hailNearestCab(playerPos: THREE.Vector3, maxDist = 7.5): { position: THREE.Vector3; heading: number } | null {
+    const dispatched = this.serviceUnits.find(u => u.kind === 'taxi' && u.active)
+    if (dispatched) {
+      const dist = Math.hypot(dispatched.root.position.x - playerPos.x, dispatched.root.position.z - playerPos.z)
+      if (dist <= maxDist) {
+        return { position: dispatched.root.position, heading: dispatched.root.rotation.y }
+      }
+    }
+    for (const car of this.vehicles) {
+      if (car.patrol || !car.root.visible) continue
+      if (car.root.name !== 'Yellow Cab') continue
+      const dist = Math.hypot(car.root.position.x - playerPos.x, car.root.position.z - playerPos.z)
+      if (dist <= maxDist) {
+        car.speed = 0
+        return { position: car.root.position, heading: car.root.rotation.y }
+      }
+    }
+    return null
+  }
+
+  /** Drive the dispatched taxi toward a destination for GTA IV backseat cab ride. */
+  driveCabTo(targetPos: THREE.Vector3, startPos?: THREE.Vector3): { position: THREE.Vector3; heading: number; arrived: boolean } {
+    let unit = this.serviceUnits.find(u => u.kind === 'taxi')
+    if (!unit) {
+      this.summonServiceVehicle('taxi', startPos ?? targetPos)
+      unit = this.serviceUnits.find(u => u.kind === 'taxi')!
+    }
+    if (startPos && !unit.active) {
+      unit.root.position.set(startPos.x, 0.04, startPos.z)
+    }
+    unit.active = true
+    unit.root.visible = true
+    unit.timer = 90
+    unit.target.copy(targetPos)
+    unit.rideSpeed = 16.5
+    unit.arrived = Math.hypot(unit.target.x - unit.root.position.x, unit.target.z - unit.root.position.z) < 2.2
+    return { position: unit.root.position, heading: unit.root.rotation.y, arrived: unit.arrived }
+  }
+
   /** Check whether a driven vehicle runs over an active roadblock spike strip (3+ stars). */
   checkSpikeStripHit(vehiclePos: THREE.Vector3, wanted: number): boolean {
     if (levelOf(wanted) < 3 || vehiclePos.y > 1.5) return false
@@ -593,6 +737,7 @@ export class CityLife {
     for (const person of this.people) this.updatePerson(person, dt, player, navTarget, level)
     for (const officer of this.officers) if (officer.active) this.updatePerson(officer, dt, player, navTarget, level)
     for (const vehicle of this.vehicles) this.updateVehicle(vehicle, dt, navTarget, level)
+    this.updateServiceUnits(dt)
     this.updateRoadblocks(navTarget, level)
     this.updateHelicopter(dt, navTarget, level)
     this.updateBirds(dt, player)
@@ -667,7 +812,13 @@ export class CityLife {
 
     target.hp = Math.max(0, target.hp - dmg)
     const killed = target.hp <= 0
-    this.hitPerson(target, origin, hitZone === 'limb' || killed ? 7.4 : 4.2)
+    const ragdollZone: RagdollHitZone = hitZone === 'head'
+      ? 'head'
+      : hitZone === 'limb'
+        ? (end.y < target.root.position.y + 0.85 ? 'leg' : 'arm')
+        : 'torso'
+    const impulseStrength = hitZone === 'head' ? 8.2 : hitZone === 'limb' ? 6.8 : Math.max(4.5, Math.min(11, baseDamage * 0.14))
+    this.hitPerson(target, origin, impulseStrength, ragdollZone, killed)
     if (killed) {
       target.down = Math.max(target.down, target.police ? 12 : 9)
       target.hp = target.maxHp
@@ -683,6 +834,45 @@ export class CityLife {
       armorBroken,
       killed,
     }
+  }
+
+  /** Close-quarters street-brawl strike with optional weapon disarm and localized Euphoria stumble. */
+  applyBrawlHit(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    damage: number,
+    disarm = false,
+  ): { hit: boolean; hitCop: boolean; killed: boolean; disarmed: boolean } {
+    const dir = direction.clone().setY(0).normalize()
+    let best: Pedestrian | undefined
+    let bestDist = 2.65
+    for (const person of [...this.people, ...this.officers]) {
+      if (!person.active || person.down > 0) continue
+      const dx = person.root.position.x - origin.x
+      const dz = person.root.position.z - origin.z
+      const dist = Math.hypot(dx, dz)
+      if (dist > bestDist) continue
+      const dot = dist < 0.2 ? 1 : (dx * dir.x + dz * dir.z) / dist
+      if (dot < 0.2) continue
+      bestDist = dist
+      best = person
+    }
+    if (!best) return { hit: false, hitCop: false, killed: false, disarmed: false }
+    let disarmed = false
+    if (disarm && best.police && best.disarmedTimer <= 0) {
+      best.disarmedTimer = 7
+      best.fire = Math.max(best.fire, 7)
+      this.dropWeaponProp(best)
+      disarmed = true
+    }
+    best.hp = Math.max(0, best.hp - damage)
+    const killed = best.hp <= 0
+    this.hitPerson(best, origin, killed || disarm ? 7.5 : 4.2, disarm ? 'arm' : 'torso', killed)
+    if (killed) {
+      best.down = Math.max(best.down, best.police ? 12 : 9)
+      best.hp = best.maxHp
+    }
+    return { hit: true, hitCop: best.police, killed, disarmed }
   }
 
   /** Radial explosive blast (grenades / launcher) damaging nearby people, police, and vehicles. */
@@ -749,7 +939,7 @@ export class CityLife {
       const dy = person.root.position.y + 1 - position.y
       const dz = person.root.position.z - position.z
       if (dx * dx + dy * dy + dz * dz <= (radius + 0.45) ** 2) {
-        this.hitPerson(person, position, strength)
+        this.hitPerson(person, position, strength, strength > 7 ? 'torso' : 'leg', strength >= 9)
         hit += 1
       }
     }
@@ -791,7 +981,7 @@ export class CityLife {
     const target = new THREE.Vector3(player.x, player.y + 1.2, player.z)
 
     for (const officer of this.officers) {
-      if (!officer.active || officer.down > 0) continue
+      if (!officer.active || officer.down > 0 || officer.disarmedTimer > 0) continue
       officer.fire -= dt
       const dx = officer.root.position.x - player.x
       const dz = officer.root.position.z - player.z
@@ -1000,6 +1190,53 @@ export class CityLife {
       reportSeverity: 1,
       reportOrigin: new THREE.Vector3(),
       lostLosTimer: 0,
+      ragdoll: createRagdollRig(),
+      disarmedTimer: 0,
+    }
+  }
+
+  private dropWeaponProp(person: Pedestrian): void {
+    if (!person.droppedWeapon) {
+      const gun = new THREE.Mesh(this.boxGeometry, this.material('#1a1f26'))
+      gun.scale.set(0.1, 0.14, 0.38)
+      gun.castShadow = true
+      this.group.add(gun)
+      person.droppedWeapon = gun
+    }
+    person.droppedWeapon.visible = true
+    person.droppedWeapon.position.set(
+      person.root.position.x + (person.side * 0.45),
+      0.08,
+      person.root.position.z + 0.3,
+    )
+    person.droppedWeapon.rotation.set(0, person.root.rotation.y + 0.6, Math.PI * 0.48)
+  }
+
+  private updateServiceUnits(dt: number): void {
+    for (const u of this.serviceUnits) {
+      if (!u.active) continue
+      u.timer -= dt
+      if (u.timer <= 0) {
+        u.active = false
+        u.root.visible = false
+        continue
+      }
+      const dx = u.target.x - u.root.position.x
+      const dz = u.target.z - u.root.position.z
+      const dist = Math.hypot(dx, dz)
+      if (dist > 1.2) {
+        const spd = u.rideSpeed ?? (u.kind === 'taxi' ? 12.5 : 14)
+        const move = Math.min(dist, spd * dt)
+        u.root.position.x += (dx / dist) * move
+        u.root.position.z += (dz / dist) * move
+        u.root.rotation.y = angleDamp(u.root.rotation.y, Math.atan2(dx, dz), 5, dt)
+        u.arrived = false
+      } else {
+        u.arrived = true
+      }
+      const flash = Math.floor(this.time * 6) % 2 === 0
+      if (u.red) u.red.visible = flash
+      if (u.blue) u.blue.visible = u.kind === 'arms_van' ? true : !flash
     }
   }
 
@@ -1008,6 +1245,7 @@ export class CityLife {
     person.stagger = Math.max(0, person.stagger - dt)
     person.down = Math.max(0, person.down - dt)
     person.hitLock = Math.max(0, person.hitLock - dt)
+    person.disarmedTimer = Math.max(0, person.disarmedTimer - dt)
     const pos = person.root.position
     pos.addScaledVector(person.impulse, dt)
     person.impulse.multiplyScalar(Math.exp(-4.5 * dt))
@@ -1091,6 +1329,32 @@ export class CityLife {
       pos.set(THREE.MathUtils.clamp(realPlayer.x + Math.cos(angle) * 28, -375, 365), 0.04, THREE.MathUtils.clamp(realPlayer.z + Math.sin(angle) * 28, -375, 375))
     }
 
+    if (person.droppedWeapon && person.down <= 0 && person.disarmedTimer <= 0) {
+      person.droppedWeapon.visible = false
+    }
+
+    stepRagdoll(
+      person.ragdoll,
+      {
+        root: person.root,
+        model: person.model,
+        leftArm: person.leftArm,
+        rightArm: person.rightArm,
+        leftLeg: person.leftLeg,
+        rightLeg: person.rightLeg,
+      },
+      dt,
+      person.streetX === 0 ? 0.14 : 0.04,
+    )
+    const ragState = person.ragdoll.state
+    if (ragState !== 'upright') {
+      person.stagger = Math.max(person.stagger, ragState === 'stumble' || ragState === 'recovering' ? 0.2 : 0)
+      if (ragState === 'falling' || ragState === 'down_writhing' || ragState === 'sleeping') {
+        person.down = Math.max(person.down, 0.25)
+      }
+      return
+    }
+
     const moving = person.down <= 0 && (dx !== 0 || dz !== 0)
     person.phase += dt * (moving ? speed * 3.3 : 1)
     const swing = moving ? Math.sin(person.phase) * (person.flee > 0 ? 0.9 : 0.55) : 0
@@ -1113,7 +1377,13 @@ export class CityLife {
     person.model.position.y = moving ? Math.abs(Math.sin(person.phase)) * 0.035 : 0
   }
 
-  private hitPerson(person: Pedestrian, from: THREE.Vector3, force: number): void {
+  private hitPerson(
+    person: Pedestrian,
+    from: THREE.Vector3,
+    force: number,
+    zone: RagdollHitZone = 'torso',
+    lethal = false,
+  ): void {
     let dx = person.root.position.x - from.x
     let dz = person.root.position.z - from.z
     const distance = Math.hypot(dx, dz)
@@ -1129,9 +1399,13 @@ export class CityLife {
       person.witnessState = 'down'
       person.reportTimer = 0
       person.shockTimer = 0
+      if (person.witnessPhone) person.witnessPhone.visible = false
+    } else if (force >= 5 || lethal) {
+      this.dropWeaponProp(person)
     }
+    applyRagdollImpulse(person.ragdoll, person.root.position, from, force, zone, lethal, person.flee > 0)
     person.impulse.set(dx * Math.min(10, force), 0, dz * Math.min(10, force))
-    person.down = Math.max(person.down, 1.6 + Math.min(2.4, force * 0.18))
+    person.down = Math.max(person.down, lethal ? 6.5 : 1.6 + Math.min(2.4, force * 0.18))
     person.stagger = 1
     person.hitLock = 0.6
     person.danger.copy(from)
@@ -1167,7 +1441,8 @@ export class CityLife {
     const patrol = role !== 'civilian'
     const root = new THREE.Group()
     const body = new THREE.Group()
-    root.name = role === 'military' ? 'Military APC' : role === 'swat' ? 'SWAT tactical van' : patrol ? 'Police patrol car' : 'Traffic car'
+    const isCab = role === 'civilian' && (color === '#ebd369' || color === '#e8c16a')
+    root.name = role === 'military' ? 'Military APC' : role === 'swat' ? 'SWAT tactical van' : patrol ? 'Police patrol car' : isCab ? 'Yellow Cab' : 'Traffic car'
     root.add(body)
 
     let turret: THREE.Group | undefined
@@ -1235,6 +1510,8 @@ export class CityLife {
         this.box(body, '#202b3d', 0, 1.59, -0.2, 1.0, 0.12, 0.36)
         red = this.box(body, '#ff3f58', -0.28, 1.7, -0.2, 0.42, 0.2, 0.3, true)
         blue = this.box(body, '#3e9fff', 0.28, 1.7, -0.2, 0.42, 0.2, 0.3, true)
+      } else if (isCab) {
+        this.box(body, '#fff29c', 0, 1.58, 0.05, 0.55, 0.16, 0.24, true)
       }
       for (const x of [-1.02, 1.02]) for (const z of [-1.35, 1.35]) {
         const wheel = new THREE.Mesh(this.wheelGeometry, this.material('#20252c'))

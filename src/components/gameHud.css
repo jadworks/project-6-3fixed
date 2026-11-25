@@ -443,3 +443,292 @@
 .vbn-sa-track { height: 6px; background: rgba(255,255,255,.15); overflow: hidden; }
 .vbn-sa-track i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--vbn-cyan), #62f4b8); transition: width .18s ease; }
 .vbn-sa-foot { margin: 10px 0 0; font-size: 8px; font-weight: 800; letter-spacing: .1em; color: #9db0b5; line-height: 1.4; }
+
+/* GTA 6 APB Known Intel Badges & Expandable Dispatch Ticker */
+.vbn-apb-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; margin: -4px 0 9px; max-width: 280px; }
+.vbn-apb-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.vbn-apb-tag { padding: 2px 6px; border: 1px solid rgba(255,255,255,.2); background: rgba(11,16,24,.88); font-size: 8px; font-weight: 900; letter-spacing: .09em; color: #aebcc4; }
+.vbn-apb-tag.is-hot { border-color: rgba(255,71,94,.7); color: #ff8e9c; background: rgba(45,12,18,.88); }
+.vbn-apb-tag.is-clear { border-color: rgba(119,230,231,.55); color: var(--vbn-cyan); background: rgba(10,30,36,.88); }
+.vbn-apb-ticker { padding: 4px 8px; border-left: 2px solid var(--vbn-yellow); background: rgba(8,12,18,.92); font-size: 8.5px; font-weight: 800; letter-spacing: .07em; color: #f1ede4; text-align: right; line-height: 1.35; }
+
+/* Gritty GTA IV Liberty City Atmosphere Grade (no backdrop-filter) */
+.vbn-game.is-gritty .vbn-camera-grade { background: radial-gradient(circle at center, rgba(164,158,138,.06) 35%, rgba(18,22,26,.42) 100%); mix-blend-mode: multiply; }
+
+/* Rain Windshield Wipers Overlay during rain vehicle drive */
+.vbn-wipers { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; opacity: .55; }
+.vbn-wiper { position: absolute; bottom: -26px; width: 42vw; max-width: 440px; height: 5px; background: linear-gradient(90deg, #1b2026, #323a44); transform-origin: 0% 50%; animation: vbnWiper 1.55s ease-in-out infinite alternate; }
+.vbn-wiper.is-left { left: 18%; }
+.vbn-wiper.is-right { left: 56%; animation-delay: .08s; }
+@keyframes vbnWiper {
+  0% { transform: rotate(-14deg); }
+  100% { transform: rotate(-84deg); }
+}
+
+/* Vehicle Mechanical & Seatbelt Telemetry */
+.vbn-vehicle-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-size: 9px; font-weight: 900; letter-spacing: .12em; color: #c7d4da; }
+.vbn-vehicle-meta span { padding: 3px 7px; background: rgba(8,13,20,.88); border-right: 2px solid var(--vbn-cyan); }
+.vbn-vehicle-meta span.is-warn { border-color: #ff475e; color: #ff8e9c; }
+.vbn-hud-phone-btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; border: 1px solid rgba(119,230,231,.38); background: rgba(11,17,26,.92); color: var(--vbn-cyan); font-size: 10px; font-weight: 900; letter-spacing: .12em; }
+.vbn-hud-phone-btn:hover { border-color: var(--vbn-yellow); color: var(--vbn-yellow); }
+
+/* 2008 Badger / Whiz Smartphone (Bottom-Right) */
+.vbn-phone { position: absolute; right: 2.5%; bottom: 84px; z-index: 6; width: 226px; pointer-events: auto; }
+.vbn-phone.is-vibrating { animation: vbnPhoneBuzz .16s linear infinite; }
+@keyframes vbnPhoneBuzz {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(3px); }
+}
+.vbn-phone-shell { padding: 10px; border-radius: 16px; border: 2px solid #59636e; background: linear-gradient(180deg, #272d35, #14181e); box-shadow: 0 18px 42px rgba(0,0,0,.78); }
+.vbn-phone-earpiece { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 8px; font-weight: 900; letter-spacing: .16em; color: #9aa7b4; }
+.vbn-phone-earpiece span { width: 32px; height: 4px; border-radius: 2px; background: #0c0f13; }
+.vbn-phone-earpiece button { padding: 2px 5px; background: transparent; border: none; color: #b6c2cc; font-size: 11px; font-weight: 900; }
+.vbn-phone-lcd { min-height: 215px; padding: 8px; border-radius: 6px; border: 1px solid #3c5347; background: linear-gradient(180deg, #162621, #0d1715); color: #e6f5ea; }
+.vbn-phone-status { display: flex; justify-content: space-between; font-size: 8px; font-weight: 900; color: #8be0c5; padding-bottom: 6px; border-bottom: 1px solid rgba(139,224,197,.22); margin-bottom: 7px; }
+.vbn-phone-menu { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.vbn-phone-menu button { display: flex; flex-direction: column; align-items: flex-start; padding: 7px 6px; border: 1px solid rgba(139,224,197,.24); background: rgba(255,255,255,.04); text-align: left; }
+.vbn-phone-menu button:hover, .vbn-phone-menu button.is-key-focus { border-color: #f6d66d; background: rgba(246,214,109,.15); }
+.vbn-phone-menu button b { font-size: 10px; color: #f6d66d; letter-spacing: .08em; }
+.vbn-phone-menu button span { font-size: 7.5px; color: #cde2d8; line-height: 1.25; }
+.vbn-phone-title { margin: 0 0 6px; font-size: 9px; font-weight: 900; letter-spacing: .12em; color: #f6d66d; }
+.vbn-phone-sub { display: flex; flex-direction: column; gap: 4px; }
+.vbn-phone-sub button { padding: 6px 7px; border: 1px solid rgba(139,224,197,.26); background: rgba(255,255,255,.05); color: #eef7f1; font-size: 8.5px; font-weight: 900; letter-spacing: .06em; text-align: left; }
+.vbn-phone-sub button:hover, .vbn-phone-sub button.is-key-focus { border-color: #77e6e7; background: rgba(119,230,231,.18); }
+.vbn-phone-sub button.is-back { margin-top: 4px; border-color: rgba(255,255,255,.18); color: #9eb7ab; }
+.vbn-phone-cambox { height: 96px; display: grid; place-items: center; border: 1px solid rgba(139,224,197,.28); background: #09100e; overflow: hidden; margin-bottom: 4px; font-size: 8px; color: #7fa296; }
+.vbn-phone-cambox img { width: 100%; height: 100%; object-fit: cover; }
+.vbn-phone-smslist { max-height: 138px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+.vbn-phone-sms { padding: 5px; border-left: 2px solid #f6d66d; background: rgba(255,255,255,.04); }
+.vbn-phone-sms strong { display: flex; justify-content: space-between; font-size: 8px; color: #f6d66d; }
+.vbn-phone-sms p { margin: 2px 0 0; font-size: 8px; line-height: 1.3; color: #d9eae0; }
+.vbn-phone-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 8px; }
+.vbn-phone-keys button { padding: 5px 0; border-radius: 5px; border: 1px solid #49525c; background: #1e242c; color: #d6e2ea; font-size: 8.5px; font-weight: 900; letter-spacing: .08em; }
+.vbn-phone-keys button:hover { border-color: #77e6e7; color: #fff; }
+
+/* Controller UI Menu Focus Ring */
+.vbn button.is-pad-focus {
+  outline: 2px solid var(--vbn-cyan);
+  outline-offset: 2px;
+  border-color: var(--vbn-cyan);
+  box-shadow: 0 0 14px rgba(119,230,231,.35);
+}
+
+/* Mobile & Tablet Multi-Touch Controller Overlay */
+.vbn-touch {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  touch-action: none;
+}
+.vbn-touch-look {
+  position: absolute;
+  left: 38%;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+.vbn-touch-stick-zone {
+  position: absolute;
+  left: max(10px, env(safe-area-inset-left));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  width: 174px;
+  height: 174px;
+  display: grid;
+  place-items: center;
+  pointer-events: auto;
+  touch-action: none;
+}
+.vbn-touch-ring {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  border: 2px solid rgba(119,230,231,.42);
+  background: rgba(8,14,22,.46);
+  transition: border-color .15s, background .15s;
+}
+.vbn-touch-ring.is-active {
+  border-color: var(--vbn-pink);
+  background: rgba(14,22,34,.68);
+}
+.vbn-touch-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid #fff8ee;
+  background: radial-gradient(circle at 35% 30%, rgba(255,75,152,.9), rgba(18,28,42,.92));
+  box-shadow: 0 4px 14px rgba(0,0,0,.55);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.vbn-touch-quick {
+  position: absolute;
+  top: 108px;
+  right: max(12px, env(safe-area-inset-right));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 245px;
+  pointer-events: none;
+}
+.vbn-touch-foot,
+.vbn-touch-vehicle,
+.vbn-touch-taxi {
+  position: absolute;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+.vbn-touch-ctx-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.vbn-touch-arc {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  grid-template-rows: auto auto;
+  gap: 8px;
+  align-items: end;
+  justify-items: end;
+}
+.vbn-touch-pedals {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.vbn-tbtn {
+  pointer-events: auto;
+  touch-action: none;
+  min-width: 46px;
+  min-height: 46px;
+  padding: 0 11px;
+  border: 1.5px solid rgba(255,255,255,.32);
+  border-radius: 10px;
+  background: rgba(9,15,24,.78);
+  color: #f6f2ea;
+  font-size: 10px !important;
+  font-weight: 900 !important;
+  letter-spacing: .1em;
+  text-shadow: 0 1px 2px #000;
+  transition: transform .08s, border-color .1s, background .1s;
+}
+.vbn-tbtn.is-down {
+  transform: scale(.93);
+  border-color: var(--vbn-yellow);
+  background: rgba(255,214,109,.28);
+}
+.vbn-tbtn.is-toggled {
+  border-color: var(--vbn-cyan);
+  background: rgba(119,230,231,.24);
+  color: var(--vbn-cyan);
+}
+.vbn-tbtn.is-util {
+  min-width: 50px;
+  min-height: 44px;
+  padding: 0 9px;
+  font-size: 9px !important;
+  border-color: rgba(119,230,231,.38);
+}
+.vbn-tbtn.is-sec {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  padding: 0;
+}
+.vbn-tbtn.is-fire {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border-color: var(--vbn-pink);
+  background: radial-gradient(circle at 35% 30%, rgba(255,75,152,.86), rgba(165,24,78,.88));
+  font-size: 12px !important;
+  box-shadow: 0 4px 18px rgba(255,75,152,.4);
+}
+.vbn-tbtn.is-gas {
+  min-width: 64px;
+  height: 66px;
+  border-color: #62f4b8;
+  background: rgba(24,76,56,.88);
+  font-size: 12px !important;
+}
+.vbn-tbtn.is-brake {
+  min-width: 60px;
+  height: 56px;
+  border-color: #ff6b7d;
+  background: rgba(78,24,34,.88);
+}
+.vbn-tbtn.is-ctx {
+  min-height: 44px;
+  padding: 0 14px;
+  border-color: var(--vbn-yellow);
+  background: rgba(42,32,12,.92);
+  color: var(--vbn-yellow);
+  max-width: 195px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vbn-tbtn.is-ctx.is-car {
+  border-color: var(--vbn-cyan);
+  background: rgba(12,34,42,.92);
+  color: var(--vbn-cyan);
+}
+
+/* Keep HUD non-overlapping when mobile virtual controls are visible */
+body.has-mobile-touch .vbn-game-bottom-left {
+  left: max(12px, env(safe-area-inset-left));
+  top: 122px;
+  bottom: auto;
+  width: 112px;
+}
+body.has-mobile-touch .vbn-minimap { height: 84px; }
+body.has-mobile-touch .vbn-map-caption { display: none; }
+body.has-mobile-touch .vbn-game-bottom-right {
+  bottom: auto;
+  top: 70px;
+  right: max(12px, env(safe-area-inset-right));
+  gap: 8px;
+}
+body.has-mobile-touch .vbn-hud-phone-btn { display: none; }
+body.has-mobile-touch .vbn-hud-pause { min-height: 32px; padding: 5px 8px; }
+body.has-mobile-touch .vbn-hud-pause kbd { display: none; }
+body.has-mobile-touch .vbn-prompt { bottom: 200px; max-width: 64vw; font-size: 11px; }
+body.has-mobile-touch .vbn-speed strong { font-size: 32px; }
+
+@media (max-width: 700px) {
+  .vbn-wheel-stage { width: min(360px, 95vw); padding: 10px 12px; }
+  .vbn-wheel-body { width: min(326px, 88vw); }
+  .vbn-wheel-core { width: 132px; }
+  .vbn-wheel-core strong { font-size: 10px; }
+  .vbn-phone { width: min(246px, 78vw); right: 4%; bottom: 18px; }
+  .vbn-phone-menu button, .vbn-phone-sub button, .vbn-phone-keys button { min-height: 44px; }
+  .vbn-sa-stats { top: 88px; left: 4%; width: min(296px, 92vw); }
+}
+@media (max-height: 520px) {
+  .vbn-touch-stick-zone { width: 146px; height: 146px; bottom: 6px; }
+  .vbn-touch-ring { width: 96px; height: 96px; }
+  .vbn-touch-quick { top: 82px; gap: 4px; }
+  .vbn-tbtn.is-util { min-height: 36px; min-width: 44px; padding: 0 7px; }
+  .vbn-tbtn.is-fire { width: 58px; height: 58px; }
+  .vbn-tbtn.is-sec { width: 46px; height: 46px; }
+  .vbn-tbtn.is-gas { height: 56px; }
+  .vbn-tbtn.is-brake { height: 48px; }
+  body.has-mobile-touch .vbn-game-bottom-left { top: 86px; width: 92px; }
+  body.has-mobile-touch .vbn-minimap { height: 70px; }
+}
+

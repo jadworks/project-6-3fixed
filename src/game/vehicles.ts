@@ -15,19 +15,102 @@ export type Vehicle = {
   health: number
   heading: number
   velocity: THREE.Vector3
+  plateNumber: string
+  colorName: string
+  vehicleClass: 'compact' | 'sedan' | 'muscle' | 'sport' | 'suv' | 'truck' | 'motorbike' | 'boat' | 'helicopter' | 'taxi'
 }
 
 export type VehicleSurface = 'asphalt' | 'wet' | 'sand' | 'dirt' | 'water'
 export type VehicleInput = { throttle: number; steer: number; handbrake: boolean }
 
-type Wheel = { spin: THREE.Group; steering: THREE.Group | null; radius: number }
-type Handling = { acceleration: number; brake: number; maxSpeed: number; reverse: number; turn: number; grip: number; width: number; length: number; radius: number }
+export type VehicleTelemetry = {
+  speedKmh: number
+  rpm: number
+  gear: number
+  engineStalled: boolean
+  cranking: boolean
+  crankProgress: number
+  seatbeltBuckled: boolean
+  hoodObstructing: boolean
+  leftHeadlightOk: boolean
+  rightHeadlightOk: boolean
+  wheelSlip: number
+  suspensionCreak: boolean
+  plateNumber: string
+  colorName: string
+  damageState: string
+  windshieldCracked: boolean
+}
+
+export type VehicleCollisionReaction = {
+  ejectThroughWindshield: boolean
+  ejectionVelocity: THREE.Vector3
+  crashedHard: boolean
+  glassShattered: boolean
+  suspensionBottomed: boolean
+}
+
+type Wheel = {
+  pivot: THREE.Group
+  spin: THREE.Group
+  steering: THREE.Group | null
+  radius: number
+  restY: number
+  compression: number
+  vel: number
+  sideSign: number
+  front: boolean
+  bentYaw: number
+  bentCamber: number
+}
+
+type Handling = {
+  massKg: number
+  acceleration: number
+  brake: number
+  maxSpeed: number
+  reverse: number
+  turn: number
+  grip: number
+  width: number
+  length: number
+  radius: number
+  springStiffness: number
+  damper: number
+  rollStiffness: number
+  hasAbs: boolean
+}
+
+type DeformableBody = {
+  mesh: THREE.Mesh
+  basePositions: Float32Array
+  halfW: number
+  halfH: number
+  halfD: number
+}
+
 type VehicleParts = {
   model: THREE.Group
   wheels: Wheel[]
   rotor: THREE.Group | null
   tailRotor: THREE.Group | null
   panels: THREE.Object3D[]
+  deformableBody?: DeformableBody
+  hoodPivot?: THREE.Group
+  hoodState: 'closed' | 'popped' | 'detached'
+  frontBumper?: THREE.Mesh
+  rearBumper?: THREE.Mesh
+  windshieldMesh?: THREE.Mesh
+  windshieldMaterial?: THREE.MeshStandardMaterial
+  windshieldCracked: boolean
+  leftHeadlight?: THREE.Mesh
+  rightHeadlight?: THREE.Mesh
+  leftTaillight?: THREE.Mesh
+  rightTaillight?: THREE.Mesh
+  leftHeadlightBroken: boolean
+  rightHeadlightBroken: boolean
+  leftTaillightBroken: boolean
+  rightTaillightBroken: boolean
   paint: THREE.MeshStandardMaterial
   paintColor: THREE.Color
   brakeLight: THREE.MeshStandardMaterial
@@ -35,13 +118,25 @@ type VehicleParts = {
   wheelAngle: number
   steerAngle: number
   previousSpeed: number
+  previousYaw: number
+  heaveY: number
+  heaveVel: number
+  pitchAngle: number
+  rollAngle: number
+  wheelSpinSlip: number
+  axleBias: number
+  engineStalled: boolean
+  crankTimer: number
+  seatbeltTimer: number
   smokeTimer: number
   fireTimer: number
   impactCooldown: number
   punctureTimer: number
   damageStage: number
   phase: number
+  lastDeformHash: number
 }
+
 type Particle = {
   mesh: THREE.Mesh
   velocity: THREE.Vector3
@@ -57,32 +152,67 @@ const clamp = THREE.MathUtils.clamp
 const damp = THREE.MathUtils.damp
 const UP = new THREE.Vector3(0, 1, 0)
 const PARTICLE_LIMIT = 100
+const SKIDMARK_LIMIT = 140
 const NO_INPUT: VehicleInput = { throttle: 0, steer: 0, handbrake: false }
 const GROUND_Y = 0
 const HELICOPTER_CEILING = 32
 
-const CAR: Handling = { acceleration: 12, brake: 22, maxSpeed: 31, reverse: 9, turn: 1.55, grip: 7.5, width: 1.02, length: 2.1, radius: 1.35 }
-const SPORT: Handling = { acceleration: 17, brake: 26, maxSpeed: 38, reverse: 10, turn: 1.75, grip: 8.1, width: 1.06, length: 2.12, radius: 1.4 }
-const MUSCLE: Handling = { acceleration: 15, brake: 20, maxSpeed: 34, reverse: 9, turn: 1.4, grip: 5.4, width: 1.09, length: 2.2, radius: 1.45 }
-const BIKE: Handling = { acceleration: 16, brake: 20, maxSpeed: 35, reverse: 6, turn: 2.0, grip: 8.5, width: 0.45, length: 1.4, radius: 0.8 }
-const TRUCK: Handling = { acceleration: 8.5, brake: 18, maxSpeed: 25, reverse: 7, turn: 1.05, grip: 6.0, width: 1.2, length: 2.8, radius: 1.8 }
-const BOAT: Handling = { acceleration: 10, brake: 8, maxSpeed: 27, reverse: 7, turn: 1.15, grip: 2.4, width: 1.05, length: 2.35, radius: 1.4 }
-const HELI: Handling = { acceleration: 9, brake: 10, maxSpeed: 25, reverse: 7, turn: 1.2, grip: 2.0, width: 1.25, length: 2.35, radius: 1.7 }
+const COMPACT: Handling = { massKg: 1300, acceleration: 13.2, brake: 21, maxSpeed: 30, reverse: 9, turn: 1.62, grip: 7.4, width: 0.96, length: 1.9, radius: 1.25, springStiffness: 34, damper: 6.2, rollStiffness: 1.0, hasAbs: false }
+const CAR: Handling = { massKg: 1850, acceleration: 12.2, brake: 22, maxSpeed: 31, reverse: 9, turn: 1.52, grip: 7.2, width: 1.02, length: 2.1, radius: 1.35, springStiffness: 30, damper: 5.5, rollStiffness: 0.85, hasAbs: true }
+const SPORT: Handling = { massKg: 1520, acceleration: 17.5, brake: 26, maxSpeed: 38.5, reverse: 10, turn: 1.75, grip: 8.2, width: 1.06, length: 2.12, radius: 1.4, springStiffness: 42, damper: 7.2, rollStiffness: 1.35, hasAbs: true }
+const MUSCLE: Handling = { massKg: 1850, acceleration: 15.8, brake: 19.5, maxSpeed: 34.5, reverse: 9, turn: 1.38, grip: 5.2, width: 1.09, length: 2.2, radius: 1.45, springStiffness: 28, damper: 4.8, rollStiffness: 0.72, hasAbs: false }
+const SUV: Handling = { massKg: 3400, acceleration: 10.6, brake: 18.5, maxSpeed: 28, reverse: 8, turn: 1.26, grip: 6.1, width: 1.14, length: 2.38, radius: 1.58, springStiffness: 24, damper: 4.4, rollStiffness: 0.52, hasAbs: true }
+const TRUCK: Handling = { massKg: 9000, acceleration: 8.5, brake: 17.5, maxSpeed: 25, reverse: 7, turn: 1.05, grip: 5.8, width: 1.2, length: 2.8, radius: 1.8, springStiffness: 22, damper: 4.2, rollStiffness: 0.48, hasAbs: false }
+const BIKE: Handling = { massKg: 260, acceleration: 16, brake: 20, maxSpeed: 35, reverse: 6, turn: 2.0, grip: 8.5, width: 0.45, length: 1.4, radius: 0.8, springStiffness: 36, damper: 6.5, rollStiffness: 1.2, hasAbs: false }
+const BOAT: Handling = { massKg: 2200, acceleration: 10, brake: 8, maxSpeed: 27, reverse: 7, turn: 1.15, grip: 2.4, width: 1.05, length: 2.35, radius: 1.4, springStiffness: 18, damper: 3.5, rollStiffness: 0.65, hasAbs: true }
+const HELI: Handling = { massKg: 3100, acceleration: 9, brake: 10, maxSpeed: 25, reverse: 7, turn: 1.2, grip: 2.0, width: 1.25, length: 2.35, radius: 1.7, springStiffness: 20, damper: 4.0, rollStiffness: 1.0, hasAbs: true }
+
+const RESPRAY_PALETTE: Array<[string, string]> = [
+  ['Midnight Silver', '#8b96a3'],
+  ['Liberty Cobalt', '#2e598c'],
+  ['Crimson Metallic', '#9c2c3c'],
+  ['Emerald Slate', '#2b6b5e'],
+  ['Obsidian Black', '#1e242c'],
+  ['Champagne Gold', '#b89a64'],
+]
+
+function randomPlate(index: number): string {
+  const letters = 'ABCDEFGHJKLMNPRSTUVWXYZ'
+  const a = letters[(index * 7 + 3) % letters.length]
+  const b = letters[(index * 11 + 5) % letters.length]
+  const c = letters[(index * 13 + 9) % letters.length]
+  const num = String((1041 + index * 739) % 9000 + 1000)
+  return `${a}${b}${c}-${num}`
+}
+
+function colorLabelFromHex(hex: string): string {
+  switch (hex.toLowerCase()) {
+    case '#f5c84c':
+    case '#f2c138':
+      return 'Taxi Yellow'
+    case '#ee518d':
+      return 'Magenta'
+    case '#45d5e4':
+    case '#4bbad3':
+      return 'Cyan'
+    case '#e59243':
+      return 'Amber'
+    case '#b76bea':
+      return 'Violet'
+    case '#61d8c2':
+      return 'Seafoam'
+    case '#f16c52':
+      return 'Coral Red'
+    case '#46525c':
+      return 'Gunmetal'
+    default:
+      return 'Slate'
+  }
+}
 
 /**
- * Standalone arcade simulation. Construct once, call update once per simulation frame,
- * use nearest/enter/exit for interaction and hide the player while `active` is set.
- *
- * The surface callback supplies traction only, not height: road and water level are y=0.
- * Dismount positions are at the vehicle's current base height; adjust for the player
- * controller's capsule/origin and validate safe landing as appropriate. Helicopters use
- * throttle both for forward power and lift (positive climbs, negative descends, neutral
- * hovers); lift is bounded to y=0..32. A boat is automatically placed on nearby water
- * on the first update if its original spawn is on land.
- *
- * The scene is queried for visible obstacle meshes. Mark visual-only geometry or an
- * ancestor `userData.noVehicleCollision = true` to exclude it. Obstacles added after
- * construction are picked up automatically; moving vehicle impacts are handled separately.
+ * GTA IV-inspired 4-Wheel Spring-Damper Suspension, Mass Transfer, Soft-Body Vertex Deformation,
+ * Mechanical Failure, ABS Lockup & Pooled Skidmarks Vehicle Simulation.
  */
 export class VehicleSystem {
   readonly vehicles: Vehicle[] = []
@@ -90,11 +220,16 @@ export class VehicleSystem {
   private readonly parts = new Map<Vehicle, VehicleParts>()
   private readonly particles: Particle[] = []
   private readonly particleGeometry = new THREE.IcosahedronGeometry(1, 0)
+  private readonly skidMesh: THREE.InstancedMesh
+  private readonly skidDummy = new THREE.Object3D()
+  private skidCursor = 0
+  private skidTimer = 0
   private readonly raycaster = new THREE.Raycaster()
   private readonly scratchForward = new THREE.Vector3()
   private readonly scratchRight = new THREE.Vector3()
   private readonly scratchDirection = new THREE.Vector3()
   private readonly scratchOrigin = new THREE.Vector3()
+  private readonly scratchLocalImpact = new THREE.Vector3()
   private obstacles: THREE.Object3D[] = []
   private worldColliders: WorldCollider[] = []
   private worldRamps: WorldRamp[] = []
@@ -102,26 +237,60 @@ export class VehicleSystem {
   private placedBoat = false
   private boatSpawn: THREE.Vector3 | null = null
   private time = 0
-  private readonly headlight = new THREE.SpotLight('#fff2ce', 0, 48, Math.PI / 5.5, 0.55, 1.4)
-  private readonly headlightTarget = new THREE.Object3D()
+  private readonly headlightLeft = new THREE.SpotLight('#fff2ce', 0, 52, Math.PI / 5.4, 0.55, 1.35)
+  private readonly headlightRight = new THREE.SpotLight('#fff2ce', 0, 52, Math.PI / 5.4, 0.55, 1.35)
+  private readonly headlightTargetLeft = new THREE.Object3D()
+  private readonly headlightTargetRight = new THREE.Object3D()
   private readonly contactShadowTexture = makeContactShadowTexture()
+  private readonly crackedGlassTexture = makeCrackedGlassTexture()
+  private pendingReaction: VehicleCollisionReaction = {
+    ejectThroughWindshield: false,
+    ejectionVelocity: new THREE.Vector3(),
+    crashedHard: false,
+    glassShattered: false,
+    suspensionBottomed: false,
+  }
+  private plateCounter = 1
 
   constructor(private readonly scene: THREE.Scene) {
-    this.headlight.castShadow = false
-    this.headlight.userData.noVehicleCollision = true
-    this.headlightTarget.userData.noVehicleCollision = true
-    this.scene.add(this.headlight, this.headlightTarget)
-    this.headlight.target = this.headlightTarget
-    this.addVehicle('car', 'Coastline Sedan', '#f5c84c', 4.6, 16.5, -0.1, CAR)
-    this.addVehicle('sport', 'Neon Sport', '#ee518d', -4.8, 17.5, 0.15, SPORT)
-    this.addVehicle('motorbike', 'Street Bike', '#45d5e4', 0.0, 23.5, 0, BIKE)
-    this.addVehicle('truck', 'Utility Truck', '#e59243', 10.5, 20.0, 0, TRUCK)
-    this.addVehicle('muscle', 'Night Cruiser', '#b76bea', -70, -15, 0, MUSCLE)
-    this.addVehicle('car', 'Palm Sedan', '#61d8c2', 32, -24, -Math.PI / 2, CAR)
-    this.addVehicle('sport', 'Sunset Sport', '#f16c52', 44, 18, Math.PI, SPORT)
-    this.addVehicle('motorbike', 'Dock Bike', '#f4c545', -34, 34, Math.PI / 2, BIKE)
-    this.addVehicle('boat', 'Bay Runner', '#4bbad3', 95, 0, Math.PI, BOAT)
-    this.addVehicle('helicopter', 'Bay Helicopter', '#d9e3df', 16, 29, 0, HELI)
+    this.headlightLeft.castShadow = false
+    this.headlightRight.castShadow = false
+    this.headlightLeft.userData.noVehicleCollision = true
+    this.headlightRight.userData.noVehicleCollision = true
+    this.headlightTargetLeft.userData.noVehicleCollision = true
+    this.headlightTargetRight.userData.noVehicleCollision = true
+    this.scene.add(this.headlightLeft, this.headlightRight, this.headlightTargetLeft, this.headlightTargetRight)
+    this.headlightLeft.target = this.headlightTargetLeft
+    this.headlightRight.target = this.headlightTargetRight
+
+    // Pooled asphalt tire skidmarks (zero per-frame allocations)
+    const skidGeo = new THREE.PlaneGeometry(0.32, 0.9)
+    skidGeo.rotateX(-Math.PI / 2)
+    const skidMat = new THREE.MeshBasicMaterial({ color: '#14161a', transparent: true, opacity: 0.55, depthWrite: false })
+    this.skidMesh = new THREE.InstancedMesh(skidGeo, skidMat, SKIDMARK_LIMIT)
+    this.skidMesh.frustumCulled = false
+    this.skidMesh.userData.noVehicleCollision = true
+    this.skidMesh.userData.vehicleEffect = true
+    this.skidMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    for (let i = 0; i < SKIDMARK_LIMIT; i += 1) {
+      this.skidDummy.scale.setScalar(0)
+      this.skidDummy.updateMatrix()
+      this.skidMesh.setMatrixAt(i, this.skidDummy.matrix)
+    }
+    this.skidMesh.instanceMatrix.needsUpdate = true
+    this.scene.add(this.skidMesh)
+
+    this.addVehicle('car', 'Roman Liberty Cab', '#f2c138', 4.6, 16.5, -0.1, CAR, 'taxi')
+    this.addVehicle('sport', 'Neon Sport', '#ee518d', -4.8, 17.5, 0.15, SPORT, 'sport')
+    this.addVehicle('motorbike', 'Street Bike', '#45d5e4', 0.0, 23.5, 0, BIKE, 'motorbike')
+    this.addVehicle('truck', 'Utility Truck', '#e59243', 10.5, 20.0, 0, TRUCK, 'truck')
+    this.addVehicle('suv', 'Patriot SUV', '#46525c', -8.8, -6.5, Math.PI, SUV, 'suv')
+    this.addVehicle('muscle', 'Night Cruiser', '#b76bea', -70, -15, 0, MUSCLE, 'muscle')
+    this.addVehicle('car', 'Blista Compact', '#61d8c2', 32, -24, -Math.PI / 2, COMPACT, 'compact')
+    this.addVehicle('sport', 'Sunset Sport', '#f16c52', 44, 18, Math.PI, SPORT, 'sport')
+    this.addVehicle('motorbike', 'Dock Bike', '#f4c545', -34, 34, Math.PI / 2, BIKE, 'motorbike')
+    this.addVehicle('boat', 'Bay Runner', '#4bbad3', 95, 0, Math.PI, BOAT, 'boat')
+    this.addVehicle('helicopter', 'Bay Helicopter', '#d9e3df', 16, 29, 0, HELI, 'helicopter')
   }
 
   /** Configure authoritative world OBB colliders and ramps for crisp vehicle physics. */
@@ -186,9 +355,13 @@ export class VehicleSystem {
     return best
   }
 
-  /** Wrecks cannot be entered. Switching vehicles leaves the old one to coast to a stop. */
+  /** Wrecks cannot be entered. Resets seatbelt latch timer (1.5s Niko Bellic buckle). */
   enter(vehicle: Vehicle): void {
-    if (this.parts.has(vehicle) && vehicle.health > 0) this.active = vehicle
+    if (this.parts.has(vehicle) && vehicle.health > 0) {
+      this.active = vehicle
+      const data = this.parts.get(vehicle)
+      if (data) data.seatbeltTimer = 0
+    }
   }
 
   /** Exit on the right-hand side. The caller owns player visibility and teleportation. */
@@ -201,10 +374,122 @@ export class VehicleSystem {
     return vehicle.root.position.clone().addScaledVector(right, data.handling.width + 1.0)
   }
 
+  /** High-speed bailout (F at speed): driver jumps out tumbling while car coasts and swerves driverless. */
+  bailout(): { exitPos: THREE.Vector3; velocity: THREE.Vector3; speed: number } | null {
+    const vehicle = this.active
+    if (!vehicle) return null
+    const data = this.parts.get(vehicle)!
+    const speed = Math.abs(vehicle.speed)
+    const right = new THREE.Vector3(Math.cos(vehicle.heading), 0, -Math.sin(vehicle.heading))
+    const exitPos = vehicle.root.position.clone().addScaledVector(right, data.handling.width + 1.05)
+    const vel = vehicle.velocity.clone().multiplyScalar(0.82).addScaledVector(right, 3.2)
+    // Driverless car swerves slightly as it coasts
+    data.steerAngle += (Math.random() < 0.5 ? -1 : 1) * 0.14
+    this.active = null
+    return { exitPos, velocity: vel, speed }
+  }
+
+  /** Pay 'n' Spray repair & respray: restores deformation, body health, lights, and changes plate/color! */
+  respray(vehicle: Vehicle): { colorName: string; plateNumber: string } {
+    const data = this.parts.get(vehicle)
+    if (!data) return { colorName: vehicle.colorName, plateNumber: vehicle.plateNumber }
+    const [nextColorName, nextHex] = RESPRAY_PALETTE[Math.floor(Math.random() * RESPRAY_PALETTE.length)]
+    vehicle.health = 100
+    vehicle.colorName = nextColorName
+    vehicle.plateNumber = randomPlate(this.plateCounter++)
+    data.paintColor.set(nextHex)
+    data.paint.color.copy(data.paintColor)
+    data.engineStalled = false
+    data.crankTimer = 0
+    data.axleBias = 0
+    data.punctureTimer = 0
+    data.damageStage = 0
+    data.hoodState = 'closed'
+    data.windshieldCracked = false
+    if (data.windshieldMaterial) {
+      data.windshieldMaterial.map = null
+      data.windshieldMaterial.opacity = 1
+      data.windshieldMaterial.needsUpdate = true
+    }
+    if (data.hoodPivot) {
+      data.hoodPivot.visible = true
+      data.hoodPivot.rotation.x = 0
+    }
+    if (data.frontBumper) data.frontBumper.visible = true
+    if (data.rearBumper) data.rearBumper.visible = true
+    data.leftHeadlightBroken = false
+    data.rightHeadlightBroken = false
+    data.leftTaillightBroken = false
+    data.rightTaillightBroken = false
+    if (data.leftHeadlight) data.leftHeadlight.visible = true
+    if (data.rightHeadlight) data.rightHeadlight.visible = true
+    if (data.leftTaillight) data.leftTaillight.visible = true
+    if (data.rightTaillight) data.rightTaillight.visible = true
+    for (const p of data.panels) p.visible = true
+    for (const w of data.wheels) {
+      w.bentCamber = 0
+      w.bentYaw = 0
+    }
+    if (data.deformableBody) {
+      const posAttr = data.deformableBody.mesh.geometry.getAttribute('position') as THREE.BufferAttribute
+      posAttr.array.set(data.deformableBody.basePositions)
+      posAttr.needsUpdate = true
+      data.deformableBody.mesh.geometry.computeVertexNormals()
+    }
+    return { colorName: vehicle.colorName, plateNumber: vehicle.plateNumber }
+  }
+
+  /** Consume per-step collision reaction events (e.g. >85 km/h windshield ejection, glass shatter). */
+  consumeCollisionReaction(): VehicleCollisionReaction {
+    const out: VehicleCollisionReaction = {
+      ejectThroughWindshield: this.pendingReaction.ejectThroughWindshield,
+      ejectionVelocity: this.pendingReaction.ejectionVelocity.clone(),
+      crashedHard: this.pendingReaction.crashedHard,
+      glassShattered: this.pendingReaction.glassShattered,
+      suspensionBottomed: this.pendingReaction.suspensionBottomed,
+    }
+    this.pendingReaction.ejectThroughWindshield = false
+    this.pendingReaction.ejectionVelocity.set(0, 0, 0)
+    this.pendingReaction.crashedHard = false
+    this.pendingReaction.glassShattered = false
+    this.pendingReaction.suspensionBottomed = false
+    return out
+  }
+
+  getActiveTelemetry(): VehicleTelemetry | null {
+    const v = this.active
+    if (!v) return null
+    const d = this.parts.get(v)
+    if (!d) return null
+    const absSpeed = Math.abs(v.speed)
+    const speedKmh = absSpeed * 3.6
+    const gear = absSpeed < 1 ? 1 : Math.min(5, 1 + Math.floor(absSpeed / 7.5))
+    const gearMin = (gear - 1) * 7.5
+    const rpmRatio = clamp((absSpeed - gearMin) / 8.5, 0.12, 1.0)
+    const rpm = Math.round(900 + rpmRatio * 5800)
+    const damageState = v.health > 82 ? 'Intact' : v.health > 45 ? 'Dented' : 'Wrecked'
+    return {
+      speedKmh,
+      rpm,
+      gear,
+      engineStalled: d.engineStalled,
+      cranking: d.engineStalled && d.crankTimer > 0,
+      crankProgress: d.engineStalled ? clamp(d.crankTimer / 1.1, 0, 1) : 1,
+      seatbeltBuckled: d.seatbeltTimer >= 1.5 || v.type === 'motorbike' || v.type === 'boat' || v.type === 'helicopter',
+      hoodObstructing: d.hoodState === 'popped',
+      leftHeadlightOk: !d.leftHeadlightBroken,
+      rightHeadlightOk: !d.rightHeadlightBroken,
+      wheelSlip: d.wheelSpinSlip,
+      suspensionCreak: Math.abs(d.heaveVel) > 0.85 || Math.abs(d.rollAngle) > 0.08,
+      plateNumber: v.plateNumber,
+      colorName: v.colorName,
+      damageState,
+      windshieldCracked: d.windshieldCracked,
+    }
+  }
+
   update(dt: number, input: VehicleInput, surfaceAt: (x: number, z: number) => VehicleSurface, handlingBonus = 0): void {
     if (!Number.isFinite(dt) || dt <= 0) return
-    // Large tab-resume deltas are deliberately capped; substeps prevent tunnelling and
-    // keep steering, drag, particles and impacts consistent at different frame rates.
     let remaining = Math.min(dt, 0.25)
     if (!this.placedBoat) {
       this.placeBoat(surfaceAt)
@@ -224,28 +509,176 @@ export class VehicleSystem {
     while (remaining > 1e-7) {
       const step = Math.min(remaining, 1 / 30)
       this.time += step
+      this.skidTimer = Math.max(0, this.skidTimer - step)
       for (const vehicle of this.vehicles) {
         const data = this.parts.get(vehicle)
         if (!data) continue
         data.impactCooldown = Math.max(0, data.impactCooldown - step)
         const surface = surfaceAt(vehicle.root.position.x, vehicle.root.position.z)
-        this.stepVehicle(vehicle, data, step, vehicle === this.active ? control : NO_INPUT, surface, vehicle === this.active ? handlingBonus : 0)
-        this.animateVehicle(vehicle, data, step, surface, vehicle === this.active ? control : NO_INPUT)
+        const vInput = vehicle === this.active ? control : NO_INPUT
+        this.stepVehicle(vehicle, data, step, vInput, surface, vehicle === this.active ? handlingBonus : 0)
+        this.animateVehicle(vehicle, data, step, surface, vInput)
         this.emitDamage(vehicle, data, step)
       }
       this.stepParticles(step)
       remaining -= step
     }
+
     if (this.active && this.active.health > 0) {
+      const d = this.parts.get(this.active)!
       const fwdX = -Math.sin(this.active.heading)
       const fwdZ = -Math.cos(this.active.heading)
-      this.headlight.intensity = 18
-      this.headlight.position.set(this.active.root.position.x + fwdX * 1.6, this.active.root.position.y + 1.05, this.active.root.position.z + fwdZ * 1.6)
-      this.headlightTarget.position.set(this.active.root.position.x + fwdX * 18, Math.max(0, this.active.root.position.y - 0.5), this.active.root.position.z + fwdZ * 18)
-      this.headlightTarget.updateMatrixWorld()
+      const rightX = Math.cos(this.active.heading)
+      const rightZ = -Math.sin(this.active.heading)
+      const pos = this.active.root.position
+      this.headlightLeft.intensity = d.leftHeadlightBroken ? 0 : 15
+      this.headlightRight.intensity = d.rightHeadlightBroken ? 0 : 15
+      this.headlightLeft.position.set(pos.x + fwdX * 1.65 - rightX * 0.68, pos.y + 1.0, pos.z + fwdZ * 1.65 - rightZ * 0.68)
+      this.headlightTargetLeft.position.set(pos.x + fwdX * 18 - rightX * 1.1, Math.max(0, pos.y - 0.4), pos.z + fwdZ * 18 - rightZ * 1.1)
+      this.headlightTargetLeft.updateMatrixWorld()
+      this.headlightRight.position.set(pos.x + fwdX * 1.65 + rightX * 0.68, pos.y + 1.0, pos.z + fwdZ * 1.65 + rightZ * 0.68)
+      this.headlightTargetRight.position.set(pos.x + fwdX * 18 + rightX * 1.1, Math.max(0, pos.y - 0.4), pos.z + fwdZ * 18 + rightZ * 1.1)
+      this.headlightTargetRight.updateMatrixWorld()
     } else {
-      this.headlight.intensity = 0
+      this.headlightLeft.intensity = 0
+      this.headlightRight.intensity = 0
     }
+  }
+
+  /** Apply soft-body vertex deformation + mechanical/component damage from local or world contact. */
+  deformAt(vehicle: Vehicle, worldContact: THREE.Vector3, impactSpeed: number): void {
+    const data = this.parts.get(vehicle)
+    if (!data) return
+    const h = data.handling
+    const c = Math.cos(vehicle.heading)
+    const s = Math.sin(vehicle.heading)
+    const dx = worldContact.x - vehicle.root.position.x
+    const dz = worldContact.z - vehicle.root.position.z
+    const lx = dx * c - dz * s
+    const lz = dx * s + dz * c
+    const frontHit = lz < -h.length * 0.35
+    const rearHit = lz > h.length * 0.35
+    const leftHit = lx < -0.2
+    const rightHit = lx > 0.2
+
+    // Soft-body mesh vertex crumpling around local impact zone
+    if (data.deformableBody && impactSpeed > 3.5) {
+      const { mesh, basePositions, halfW, halfD } = data.deformableBody
+      const posAttr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute
+      const arr = posAttr.array as Float32Array
+      const localImpactY = clamp(worldContact.y - vehicle.root.position.y, 0.25, 1.35)
+      this.scratchLocalImpact.set(clamp(lx, -halfW, halfW), localImpactY - 0.72, clamp(lz, -halfD, halfD))
+      const dentRadius = clamp(0.85 + impactSpeed * 0.055, 0.9, 1.75)
+      const dentDepth = clamp((impactSpeed - 3) * 0.028, 0.06, 0.42)
+      let modified = false
+
+      for (let i = 0; i < arr.length; i += 3) {
+        const vx = arr[i]
+        const vy = arr[i + 1]
+        const vz = arr[i + 2]
+        const dist = Math.hypot(vx - this.scratchLocalImpact.x, vy - this.scratchLocalImpact.y, vz - this.scratchLocalImpact.z)
+        if (dist >= dentRadius) continue
+        const falloff = 1 - dist / dentRadius
+        const push = falloff * falloff * dentDepth
+        const bx = basePositions[i]
+        const bz = basePositions[i + 2]
+        // Dent inward toward chassis core without warping below axle height
+        const nx = -Math.sign(vx || lx || 0) * 0.55
+        const nz = -Math.sign(vz || lz || 0) * 0.85
+        const nextX = vx + nx * push
+        const nextZ = vz + nz * push
+        arr[i] = clamp(nextX, bx - 0.44, bx + 0.44)
+        arr[i + 2] = clamp(nextZ, bz - 0.48, bz + 0.48)
+        if (vy > 0.05) arr[i + 1] += falloff * dentDepth * 0.22
+        modified = true
+      }
+      if (modified) {
+        posAttr.needsUpdate = true
+        mesh.geometry.computeVertexNormals()
+      }
+    }
+
+    // Individual headlight / taillight shatter, bumper detach, hood latch pop, bent axle & engine stall
+    if (frontHit && impactSpeed > 5.5) {
+      if (leftHit && !data.leftHeadlightBroken && data.leftHeadlight) {
+        data.leftHeadlightBroken = true
+        data.leftHeadlight.visible = false
+        this.pendingReaction.glassShattered = true
+      }
+      if (rightHit && !data.rightHeadlightBroken && data.rightHeadlight) {
+        data.rightHeadlightBroken = true
+        data.rightHeadlight.visible = false
+        this.pendingReaction.glassShattered = true
+      }
+      if (!leftHit && !rightHit && data.leftHeadlight && !data.leftHeadlightBroken) {
+        data.leftHeadlightBroken = true
+        data.leftHeadlight.visible = false
+        this.pendingReaction.glassShattered = true
+      }
+      if (impactSpeed > 9 && data.frontBumper?.visible) {
+        this.breakOff(vehicle, data.frontBumper)
+      }
+      if (impactSpeed > 11 && data.hoodState === 'closed' && data.hoodPivot) {
+        data.hoodState = 'popped'
+      } else if (impactSpeed > 18 && data.hoodState === 'popped' && data.hoodPivot) {
+        data.hoodState = 'detached'
+        this.breakOff(vehicle, data.hoodPivot)
+      }
+      if (impactSpeed > 12) {
+        data.axleBias = clamp(data.axleBias + (leftHit ? -1 : 1) * 0.07, -0.18, 0.18)
+        const wheel = data.wheels.find(w => w.front && (leftHit ? w.sideSign < 0 : w.sideSign > 0))
+        if (wheel) wheel.bentCamber = (leftHit ? -1 : 1) * 0.16
+      }
+      if (impactSpeed > 14 && vehicle.health < 55) {
+        data.engineStalled = true
+        data.crankTimer = 0
+      }
+      if (impactSpeed > 14 && !data.windshieldCracked && data.windshieldMaterial) {
+        data.windshieldCracked = true
+        data.windshieldMaterial.map = this.crackedGlassTexture
+        data.windshieldMaterial.needsUpdate = true
+        this.pendingReaction.glassShattered = true
+      }
+    } else if (rearHit && impactSpeed > 6) {
+      if (leftHit && !data.leftTaillightBroken && data.leftTaillight) {
+        data.leftTaillightBroken = true
+        data.leftTaillight.visible = false
+        this.pendingReaction.glassShattered = true
+      }
+      if (rightHit && !data.rightTaillightBroken && data.rightTaillight) {
+        data.rightTaillightBroken = true
+        data.rightTaillight.visible = false
+        this.pendingReaction.glassShattered = true
+      }
+      if (impactSpeed > 9 && data.rearBumper?.visible) {
+        this.breakOff(vehicle, data.rearBumper)
+      }
+    }
+
+    // High-speed (>85 km/h = 23.6 m/s) head-on crash BEFORE seatbelt buckled (1.5s) ejects player!
+    if (
+      vehicle === this.active
+      && frontHit
+      && impactSpeed >= 23.6
+      && data.seatbeltTimer < 1.5
+      && vehicle.type !== 'motorbike'
+      && vehicle.type !== 'boat'
+      && vehicle.type !== 'helicopter'
+    ) {
+      this.pendingReaction.ejectThroughWindshield = true
+      this.pendingReaction.ejectionVelocity.set(
+        -Math.sin(vehicle.heading) * Math.max(14, impactSpeed * 0.72),
+        5.8,
+        -Math.cos(vehicle.heading) * Math.max(14, impactSpeed * 0.72),
+      )
+      if (!data.windshieldCracked && data.windshieldMaterial) {
+        data.windshieldCracked = true
+        data.windshieldMaterial.map = this.crackedGlassTexture
+        data.windshieldMaterial.needsUpdate = true
+      }
+      this.pendingReaction.glassShattered = true
+    }
+    if (impactSpeed > 8) this.pendingReaction.crashedHard = true
   }
 
   damage(vehicle: Vehicle, amount: number): void {
@@ -253,7 +686,10 @@ export class VehicleSystem {
     if (!data || !Number.isFinite(amount) || amount <= 0) return
     vehicle.health = clamp(vehicle.health - amount, 0, 100)
     data.paint.color.copy(data.paintColor).multiplyScalar(0.46 + 0.54 * vehicle.health / 100)
-    // Components genuinely detach and tumble away rather than just changing color.
+    if (vehicle.health < 36 && amount > 6 && !data.engineStalled && vehicle.type !== 'boat' && vehicle.type !== 'helicopter') {
+      data.engineStalled = true
+      data.crankTimer = 0
+    }
     const stage = vehicle.health <= 25 ? 2 : vehicle.health <= 55 ? 1 : 0
     while (data.damageStage < stage) {
       const panel = data.panels[data.damageStage]
@@ -270,7 +706,16 @@ export class VehicleSystem {
     this.damage(vehicle, 12)
   }
 
-  private addVehicle(type: string, name: string, color: string, x: number, z: number, heading: number, handling: Handling): void {
+  private addVehicle(
+    type: string,
+    name: string,
+    color: string,
+    x: number,
+    z: number,
+    heading: number,
+    handling: Handling,
+    vehicleClass: Vehicle['vehicleClass'],
+  ): void {
     const root = new THREE.Group()
     root.name = `vehicle:${name}`
     root.userData.vehicleRoot = true
@@ -279,20 +724,33 @@ export class VehicleSystem {
     const model = new THREE.Group()
     model.rotation.order = 'YXZ'
     root.add(model)
-    const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.45, roughness: 0.38 })
+    const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.45, roughness: 0.36 })
     const brakeLight = new THREE.MeshStandardMaterial({ color: '#ef273b', emissive: '#ef273b', emissiveIntensity: 1.4, roughness: 0.25 })
     const parts: VehicleParts = {
       model, paint, paintColor: paint.color.clone(), brakeLight, handling,
-      wheels: [], rotor: null, tailRotor: null, panels: [], wheelAngle: 0, steerAngle: 0,
-      previousSpeed: 0, smokeTimer: 0, fireTimer: 0, impactCooldown: 0, punctureTimer: 0, damageStage: 0,
-      phase: Math.random() * Math.PI * 2,
+      wheels: [], rotor: null, tailRotor: null, panels: [],
+      hoodState: 'closed', windshieldCracked: false,
+      leftHeadlightBroken: false, rightHeadlightBroken: false,
+      leftTaillightBroken: false, rightTaillightBroken: false,
+      wheelAngle: 0, steerAngle: 0, previousSpeed: 0, previousYaw: heading,
+      heaveY: 0, heaveVel: 0, pitchAngle: 0, rollAngle: 0, wheelSpinSlip: 0,
+      axleBias: 0, engineStalled: false, crankTimer: 0, seatbeltTimer: 0,
+      smokeTimer: 0, fireTimer: 0, impactCooldown: 0, punctureTimer: 0, damageStage: 0,
+      phase: Math.random() * Math.PI * 2, lastDeformHash: 0,
     }
-    const vehicle: Vehicle = { root, type, name, speed: 0, health: 100, heading, velocity: new THREE.Vector3() }
+    const vehicle: Vehicle = {
+      root, type, name, speed: 0, health: 100, heading, velocity: new THREE.Vector3(),
+      plateNumber: randomPlate(this.plateCounter++),
+      colorName: colorLabelFromHex(color),
+      vehicleClass,
+    }
     if (type === 'motorbike') this.buildBike(parts)
     else if (type === 'truck') this.buildTruck(parts)
+    else if (type === 'suv') this.buildSuv(parts)
     else if (type === 'boat') this.buildBoat(parts)
     else if (type === 'helicopter') this.buildHelicopter(parts)
-    else this.buildCar(parts, type)
+    else this.buildCar(parts, vehicleClass)
+
     root.traverse(object => {
       if (object instanceof THREE.Mesh) {
         object.castShadow = true
@@ -320,6 +778,23 @@ export class VehicleSystem {
     const helicopter = v.type === 'helicopter'
     const boat = v.type === 'boat'
     const inWater = surface === 'water'
+
+    if (v === this.active) {
+      data.seatbeltTimer += dt
+      // Starter crank recovery when engine is stalled
+      if (data.engineStalled) {
+        if (input.throttle > 0.15 && v.health > 0) {
+          data.crankTimer += dt
+          if (data.crankTimer >= 1.1) {
+            data.engineStalled = false
+            data.crankTimer = 0
+          }
+        } else {
+          data.crankTimer = Math.max(0, data.crankTimer - dt * 0.5)
+        }
+      }
+    }
+
     const skillMult = 1 + Math.max(0, Math.min(0.45, handlingBonus))
     let power = skillMult
     let speedLimit = h.maxSpeed * (1 + Math.max(0, Math.min(0.18, handlingBonus * 0.4)))
@@ -327,9 +802,10 @@ export class VehicleSystem {
     if (boat) {
       if (!inWater) { power = 0.18; speedLimit = 3; grip = 4 }
     } else if (!helicopter) {
-      if (surface === 'wet') grip *= 0.48
+      // Wet weather reduces road friction by 30%
+      if (surface === 'wet') grip *= 0.70
       else if (surface === 'sand') { grip *= 0.57; power *= 0.66; speedLimit *= 0.65 }
-      else if (surface === 'dirt') { grip *= 0.7; power *= 0.82; speedLimit *= 0.82 }
+      else if (surface === 'dirt') { grip *= 0.70; power *= 0.82; speedLimit *= 0.82 }
       else if (inWater) { grip *= 0.28; power *= 0.2; speedLimit = 4 }
     }
     if (data.punctureTimer > 0) {
@@ -338,18 +814,30 @@ export class VehicleSystem {
       speedLimit *= 0.56
       power *= 0.72
     }
-    if (input.handbrake && !helicopter) grip *= 0.19
-    if (v.health <= 0) power = 0
-    else if (v.health < 25) power *= 0.55
 
+    // Heavier mass reduces instantaneous wheelspin twitchiness, adds weight momentum
+    const massFactor = clamp(1850 / h.massKg, 0.45, 1.35)
     this.scratchForward.set(-Math.sin(v.heading), 0, -Math.cos(v.heading))
     let longitudinal = v.velocity.dot(this.scratchForward)
     const forwardSign = longitudinal < -0.15 ? -1 : 1
+    const absLong = Math.abs(longitudinal)
+
+    const brakingHard = (input.throttle < -0.55 && longitudinal > 2.5) || input.handbrake
+    const absLockup = !helicopter && !boat && brakingHard && (!h.hasAbs || input.handbrake)
+    if (absLockup) grip *= input.handbrake ? 0.22 : 0.45
+    else if (input.handbrake && !helicopter) grip *= 0.22
+
+    if (v.health <= 0 || data.engineStalled) power = 0
+    else if (v.health < 25) power *= 0.55
+
+    // Non-ABS wheel lockup cuts steering authority under full footbrake
+    const lockSteerMult = absLockup && !input.handbrake && input.throttle < -0.5 ? 0.52 : 1.0
     const turnSpeed = helicopter
-      ? h.turn * (0.65 + 0.35 * Math.min(1, Math.abs(longitudinal) / 10))
-      : h.turn * Math.min(1, Math.abs(longitudinal) / 5) / (1 + Math.abs(longitudinal) * 0.035)
-    const driftTurn = input.handbrake && !helicopter ? 1.25 : 1
-    v.heading -= input.steer * turnSpeed * (helicopter ? 1 : forwardSign) * driftTurn * dt
+      ? h.turn * (0.65 + 0.35 * Math.min(1, absLong / 10))
+      : h.turn * Math.min(1, absLong / 4.8) / (1 + absLong * 0.038) * lockSteerMult
+    const driftTurn = input.handbrake && !helicopter ? 1.28 : 1
+    const steerWithAxle = clamp(input.steer + (absLong > 2 ? data.axleBias : 0), -1, 1)
+    v.heading -= steerWithAxle * turnSpeed * (helicopter ? 1 : forwardSign) * driftTurn * dt
     v.heading = Math.atan2(Math.sin(v.heading), Math.cos(v.heading))
     v.root.rotation.y = v.heading
     this.scratchForward.set(-Math.sin(v.heading), 0, -Math.cos(v.heading))
@@ -357,22 +845,29 @@ export class VehicleSystem {
     longitudinal = v.velocity.dot(this.scratchForward)
     let lateral = v.velocity.dot(this.scratchRight)
 
-    const throttle = v.health > 0 ? input.throttle : 0
+    const throttle = v.health > 0 && !data.engineStalled ? input.throttle : 0
     const braking = (throttle > 0.02 && longitudinal < -0.4) || (throttle < -0.02 && longitudinal > 0.4)
-    const acceleration = braking ? h.brake : h.acceleration * power
-    longitudinal += throttle * acceleration * dt
-    // Rolling and air drag, with extra resistance in soft ground / on land for boats.
-    const drag = boat && !inWater ? 1.5 : !boat && !helicopter && inWater ? 1.05 : helicopter ? 0.18 : boat ? 0.2 : 0.14
+    const acceleration = braking ? h.brake * (surface === 'wet' ? 0.72 : 1) : h.acceleration * power * (0.85 + 0.15 * massFactor)
+    // Wheel spin burnout from standstill before tires hook up
+    const launchSlip = !helicopter && !boat && throttle > 0.75 && absLong < 6.5 ? 0.82 : 1.0
+    longitudinal += throttle * acceleration * launchSlip * dt
+
+    const drag = boat && !inWater ? 1.5 : !boat && !helicopter && inWater ? 1.05 : helicopter ? 0.18 : boat ? 0.2 : 0.13
     longitudinal *= Math.exp(-drag * dt)
     if (Math.abs(throttle) < 0.01 && !helicopter) {
-      const resistance = (boat ? 0.8 : 1.4) * dt
+      const resistance = (boat ? 0.8 : 1.25) * dt
       longitudinal = Math.sign(longitudinal) * Math.max(0, Math.abs(longitudinal) - resistance)
     }
-    if (input.handbrake && !helicopter) longitudinal *= Math.exp(-1.5 * dt)
+    if (input.handbrake && !helicopter) longitudinal *= Math.exp(-1.45 * dt)
     longitudinal = clamp(longitudinal, -Math.min(h.reverse, speedLimit), speedLimit)
     lateral *= Math.exp(-grip * dt)
     v.velocity.x = this.scratchForward.x * longitudinal + this.scratchRight.x * lateral
     v.velocity.z = this.scratchForward.z * longitudinal + this.scratchRight.z * lateral
+
+    // Track wheel slip for smoke & pooled asphalt skidmarks
+    const lateralSlip = Math.abs(lateral) / Math.max(2, absLong + 2)
+    const throttleSlip = !helicopter && !boat && throttle > 0.72 && absLong < 7.5 && !data.engineStalled ? 0.85 : 0
+    data.wheelSpinSlip = clamp(Math.max(lateralSlip * 1.4, throttleSlip, absLockup && absLong > 4 ? 0.9 : 0), 0, 1)
 
     const floorY = this.worldColliders.length > 0 && !helicopter && !boat
       ? supportHeightAt(v.root.position.x, v.root.position.z, v.root.position.y, this.worldColliders, this.worldRamps, GROUND_Y)
@@ -384,8 +879,13 @@ export class VehicleSystem {
       if ((v.root.position.y <= floorY && v.velocity.y < 0) || (v.root.position.y >= HELICOPTER_CEILING && v.velocity.y > 0)) v.velocity.y = 0
     } else if (v.root.position.y > floorY || v.velocity.y > 0) {
       v.velocity.y -= 16 * dt
+      const prevVy = v.velocity.y
       v.root.position.y = Math.max(floorY, v.root.position.y + v.velocity.y * dt)
-      if (v.root.position.y <= floorY && v.velocity.y < 0) v.velocity.y = 0
+      if (v.root.position.y <= floorY && prevVy < 0) {
+        data.heaveVel += prevVy * 0.55
+        if (prevVy < -4.2 && v === this.active) this.pendingReaction.suspensionBottomed = true
+        v.velocity.y = 0
+      }
     } else {
       v.root.position.y = floorY
       v.velocity.y = 0
@@ -408,9 +908,10 @@ export class VehicleSystem {
           helicopter,
         )
         if (collision.hit && collision.impactSpeed > 3.5 && data.impactCooldown <= 0) {
-          this.damage(v, (collision.impactSpeed - 3.5) * 1.6)
+          this.damage(v, (collision.impactSpeed - 3.5) * 1.55)
+          this.deformAt(v, collision.contact, collision.impactSpeed)
           this.emitSparks(collision.contact, 4)
-          data.impactCooldown = 0.55
+          data.impactCooldown = 0.45
         }
       } else {
         this.scratchDirection.set(dx / distance, 0, dz / distance)
@@ -423,7 +924,9 @@ export class VehicleSystem {
           v.velocity.z *= -0.12
           if (impact > 3 && data.impactCooldown <= 0) {
             this.damage(v, (impact - 3) * 1.8)
-            data.impactCooldown = 0.6
+            const noseContact = v.root.position.clone().addScaledVector(this.scratchForward, h.length)
+            this.deformAt(v, noseContact, impact)
+            data.impactCooldown = 0.5
           }
         }
       }
@@ -453,6 +956,57 @@ export class VehicleSystem {
     }
   }
 
+  private emitTireSmoke(v: Vehicle, data: VehicleParts): void {
+    if (this.particles.length >= PARTICLE_LIMIT) return
+    const mat = new THREE.MeshBasicMaterial({ color: '#e6eaed', transparent: true, opacity: 0.42, depthWrite: false })
+    const mesh = new THREE.Mesh(this.particleGeometry, mat)
+    mesh.userData.vehicleEffect = true
+    const side = Math.random() < 0.5 ? -data.handling.width * 0.85 : data.handling.width * 0.85
+    const rightX = Math.cos(v.heading)
+    const rightZ = -Math.sin(v.heading)
+    const fwdX = -Math.sin(v.heading)
+    const fwdZ = -Math.cos(v.heading)
+    mesh.position.set(
+      v.root.position.x + rightX * side - fwdX * (data.handling.length * 0.6),
+      v.root.position.y + 0.22,
+      v.root.position.z + rightZ * side - fwdZ * (data.handling.length * 0.6),
+    )
+    const size = 0.24
+    mesh.scale.setScalar(size)
+    this.scene.add(mesh)
+    this.particles.push({
+      mesh,
+      velocity: new THREE.Vector3((Math.random() - 0.5) * 0.7, 0.8 + Math.random() * 0.6, (Math.random() - 0.5) * 0.7),
+      age: 0,
+      life: 0.9,
+      baseSize: size,
+      gravity: 0.15,
+      spin: new THREE.Vector3(),
+      disposableMaterial: true,
+    })
+  }
+
+  private stampSkidmarks(v: Vehicle, data: VehicleParts): void {
+    const rightX = Math.cos(v.heading)
+    const rightZ = -Math.sin(v.heading)
+    const fwdX = -Math.sin(v.heading)
+    const fwdZ = -Math.cos(v.heading)
+    for (const wheel of data.wheels) {
+      if (wheel.front || wheel.compression < -0.14) continue
+      const idx = this.skidCursor++ % SKIDMARK_LIMIT
+      this.skidDummy.position.set(
+        v.root.position.x + rightX * (wheel.sideSign * data.handling.width * 0.88) - fwdX * 1.25,
+        v.root.position.y + 0.036,
+        v.root.position.z + rightZ * (wheel.sideSign * data.handling.width * 0.88) - fwdZ * 1.25,
+      )
+      this.skidDummy.rotation.set(0, v.heading, 0)
+      this.skidDummy.scale.set(1, 1, 1)
+      this.skidDummy.updateMatrix()
+      this.skidMesh.setMatrixAt(idx, this.skidDummy.matrix)
+    }
+    this.skidMesh.instanceMatrix.needsUpdate = true
+  }
+
   private sweepWorld(v: Vehicle, h: Handling, direction: THREE.Vector3, distance: number): number {
     if (!this.obstacles.length) return distance
     const forward = this.scratchForward
@@ -464,8 +1018,6 @@ export class VehicleSystem {
     let allowed = distance
     this.raycaster.near = 0
     this.raycaster.far = distance + nose + 0.08
-    // A horizontal sweep from three points detects thin buildings and posts without
-    // treating the road or water plane as a wall.
     for (const side of [-1, 0, 1]) {
       this.scratchOrigin.set(v.root.position.x + sideX * sideExtent * side, v.root.position.y + (v.type === 'helicopter' ? 1.2 : 0.65), v.root.position.z + sideZ * sideExtent * side)
       this.raycaster.set(this.scratchOrigin, direction)
@@ -491,43 +1043,96 @@ export class VehicleSystem {
       const nz = dz / distance
       const closing = (other.velocity.x - v.velocity.x) * nx + (other.velocity.z - v.velocity.z) * nz
       const penetration = Math.max(0, min - distance)
-      v.root.position.x += nx * penetration
-      v.root.position.z += nz * penetration
+      const totalMass = data.handling.massKg + otherData.handling.massKg
+      const vShare = otherData.handling.massKg / totalMass
+      const oShare = data.handling.massKg / totalMass
+      v.root.position.x += nx * penetration * vShare
+      v.root.position.z += nz * penetration * vShare
+      other.root.position.x -= nx * penetration * oShare
+      other.root.position.z -= nz * penetration * oShare
       if (closing > 0) {
-        const impulse = closing * 0.58
-        v.velocity.x += nx * impulse
-        v.velocity.z += nz * impulse
-        other.velocity.x -= nx * impulse * 0.45
-        other.velocity.z -= nz * impulse * 0.45
+        const impulse = closing * 0.92
+        v.velocity.x += nx * impulse * vShare
+        v.velocity.z += nz * impulse * vShare
+        other.velocity.x -= nx * impulse * oShare
+        other.velocity.z -= nz * impulse * oShare
         if (closing > 3 && data.impactCooldown <= 0 && otherData.impactCooldown <= 0) {
-          this.damage(v, (closing - 3) * 1.5)
-          this.damage(other, (closing - 3) * 1.2)
-          data.impactCooldown = otherData.impactCooldown = 0.6
+          const contact = v.root.position.clone().lerp(other.root.position, 0.5)
+          contact.y += 0.65
+          this.damage(v, (closing - 3) * 1.45 * vShare * 2)
+          this.damage(other, (closing - 3) * 1.25 * oShare * 2)
+          this.deformAt(v, contact, closing)
+          this.deformAt(other, contact, closing)
+          data.impactCooldown = otherData.impactCooldown = 0.55
         }
       }
     }
   }
 
   private animateVehicle(v: Vehicle, data: VehicleParts, dt: number, surface: VehicleSurface, input: VehicleInput): void {
-    const speedRatio = clamp(Math.abs(v.speed) / data.handling.maxSpeed, 0, 1)
-    const accel = clamp((v.speed - data.previousSpeed) / Math.max(dt, 0.001), -25, 25)
+    const h = data.handling
+    const speedRatio = clamp(Math.abs(v.speed) / h.maxSpeed, 0, 1)
+    const accel = clamp((v.speed - data.previousSpeed) / Math.max(dt, 0.001), -28, 28)
     data.previousSpeed = v.speed
-    data.steerAngle = damp(data.steerAngle, input.steer * 0.48, 7, dt)
-    const lean = v.type === 'motorbike' ? -input.steer * speedRatio * 0.42 : -input.steer * speedRatio * 0.10
-    const pitch = clamp(accel * 0.007, -0.12, 0.12)
-    data.model.rotation.z = damp(data.model.rotation.z, lean, 5, dt)
-    data.model.rotation.x = damp(data.model.rotation.x, pitch + (v.type === 'helicopter' ? -speedRatio * 0.14 : 0), 5, dt)
-    const rough = surface === 'dirt' || surface === 'sand' ? 0.035 : 0.012
-    const bob = v.type === 'boat' && surface === 'water' ? Math.sin(this.time * 2 + data.phase) * 0.08 : Math.sin(this.time * 12 + data.phase) * rough * speedRatio
-    data.model.position.y = damp(data.model.position.y, bob, 8, dt)
+    const yawRate = Math.atan2(Math.sin(v.heading - data.previousYaw), Math.cos(v.heading - data.previousYaw)) / Math.max(dt, 0.001)
+    data.previousYaw = v.heading
+
+    data.steerAngle = damp(data.steerAngle, input.steer * 0.48, 7.5, dt)
+
+    // 4-wheel spring-damper pitch, roll & heave solver
+    const lateralG = clamp((v.speed * yawRate) / 14, -1.6, 1.6)
+    const targetPitch = clamp(accel * 0.0095 / Math.sqrt(h.rollStiffness), -0.14, 0.14)
+    const targetRoll = v.type === 'motorbike'
+      ? -input.steer * speedRatio * 0.42
+      : clamp(-lateralG * 0.115 / h.rollStiffness, -0.19, 0.19)
+
+    data.pitchAngle = damp(data.pitchAngle, targetPitch, 6.8, dt)
+    data.rollAngle = damp(data.rollAngle, targetRoll, 5.6, dt)
+    // Heave spring-damper bounce + engine crank shudder
+    const springForce = -h.springStiffness * data.heaveY - h.damper * data.heaveVel
+    data.heaveVel += springForce * dt
+    data.heaveY = clamp(data.heaveY + data.heaveVel * dt, -0.18, 0.18)
+
+    data.model.rotation.z = data.rollAngle
+    data.model.rotation.x = data.pitchAngle + (v.type === 'helicopter' ? -speedRatio * 0.14 : 0)
+    const rough = surface === 'dirt' || surface === 'sand' ? 0.035 : 0.011
+    const crankVibration = data.engineStalled && data.crankTimer > 0 ? Math.sin(this.time * 42) * 0.018 : 0
+    const bob = v.type === 'boat' && surface === 'water'
+      ? Math.sin(this.time * 2 + data.phase) * 0.08
+      : Math.sin(this.time * 12 + data.phase) * rough * speedRatio + data.heaveY + crankVibration
+    data.model.position.y = bob
+
+    // Independent 4-wheel suspension compression + inner-wheel lift on top-heavy SUVs/vans
     for (const wheel of data.wheels) {
-      wheel.spin.rotation.x -= v.speed * dt / wheel.radius
-      if (wheel.steering) wheel.steering.rotation.y = -data.steerAngle
+      const pitchComp = wheel.front ? -data.pitchAngle * 0.55 : data.pitchAngle * 0.55
+      const rollComp = wheel.sideSign * data.rollAngle * 1.15
+      wheel.compression = clamp(pitchComp + rollComp + data.heaveY * 0.6, -0.22, 0.16)
+      wheel.pivot.position.y = wheel.restY - wheel.compression * 0.55
+      wheel.pivot.rotation.z = wheel.bentCamber
+      const spinMult = data.wheelSpinSlip > 0.65 && !wheel.front ? 1.75 : 1.0
+      wheel.spin.rotation.x -= (v.speed * spinMult * dt) / wheel.radius
+      if (wheel.steering) wheel.steering.rotation.y = -data.steerAngle + wheel.bentYaw
     }
+
+    // Popped hood flutters dramatically in wind at speed
+    if (data.hoodPivot && data.hoodState === 'popped') {
+      const targetHoodLift = 0.38 + speedRatio * 0.35 + Math.sin(this.time * 16) * (0.04 + speedRatio * 0.08)
+      data.hoodPivot.rotation.x = damp(data.hoodPivot.rotation.x, targetHoodLift, 11, dt)
+    }
+
+    // Pooled skidmarks & tire smoke when sliding/burning out
+    if (data.wheelSpinSlip > 0.52 && v === this.active && surface !== 'water') {
+      if (this.skidTimer <= 0) {
+        this.skidTimer = 0.045
+        this.stampSkidmarks(v, data)
+      }
+      if (Math.random() < 0.45) this.emitTireSmoke(v, data)
+    }
+
     if (data.rotor) data.rotor.rotation.y += dt * (v === this.active ? 26 : v.root.position.y > 0.1 ? 16 : 3)
     if (data.tailRotor) data.tailRotor.rotation.x += dt * (v === this.active ? 38 : 5)
     const braking = input.handbrake || (input.throttle < -0.05 && v.speed > 0.5) || (input.throttle > 0.05 && v.speed < -0.5)
-    data.brakeLight.emissiveIntensity = braking ? 3.5 : 1.4
+    data.brakeLight.emissiveIntensity = braking ? 3.6 : 1.35
   }
 
   private refreshObstacles(): void {
@@ -551,10 +1156,8 @@ export class VehicleSystem {
 
   private placeBoat(surfaceAt: (x: number, z: number) => VehicleSurface): void {
     const boat = this.vehicles.find(v => v.type === 'boat')
-    // Respect a caller's explicit repositioning before the first update.
     if (boat && this.boatSpawn && boat.root.position.distanceToSquared(this.boatSpawn) > 0.0001) return
     if (!boat || surfaceAt(boat.root.position.x, boat.root.position.z) === 'water') return
-    // Find a nearby water sample without assuming which side of the map is the bay.
     const x = boat.root.position.x
     const z = boat.root.position.z
     for (let radius = 8; radius <= 160; radius += 8) {
@@ -571,8 +1174,8 @@ export class VehicleSystem {
   }
 
   private emitDamage(v: Vehicle, data: VehicleParts, dt: number): void {
-    if (v.health < 65) {
-      data.smokeTimer += dt * (v.health < 25 ? 8 : 4)
+    if (v.health < 65 || data.engineStalled) {
+      data.smokeTimer += dt * (v.health < 25 || data.engineStalled ? 7.5 : 3.8)
       while (data.smokeTimer >= 1) { data.smokeTimer -= 1; this.emitParticle(v, false) }
     }
     if (v.health < 25) {
@@ -583,11 +1186,11 @@ export class VehicleSystem {
 
   private emitParticle(v: Vehicle, fire: boolean): void {
     if (this.particles.length >= PARTICLE_LIMIT) return
-    const material = new THREE.MeshBasicMaterial({ color: fire ? (Math.random() < 0.5 ? '#ffbb33' : '#ff5422') : '#393d44', transparent: true, opacity: fire ? 0.88 : 0.58, depthWrite: false })
+    const material = new THREE.MeshBasicMaterial({ color: fire ? (Math.random() < 0.5 ? '#ffbb33' : '#ff5422') : '#2e333a', transparent: true, opacity: fire ? 0.88 : 0.62, depthWrite: false })
     const mesh = new THREE.Mesh(this.particleGeometry, material)
     mesh.userData.vehicleEffect = true
     const forward = new THREE.Vector3(-Math.sin(v.heading), 0, -Math.cos(v.heading))
-    const offset = v.type === 'boat' ? 0.2 : 1
+    const offset = v.type === 'boat' ? 0.2 : 1.15
     mesh.position.copy(v.root.position).addScaledVector(forward, offset)
     mesh.position.y += v.type === 'helicopter' ? 1.7 : 1.05
     mesh.position.x += (Math.random() - 0.5) * 0.45
@@ -647,26 +1250,58 @@ export class VehicleSystem {
   private buildCar(data: VehicleParts, variant: string): void {
     const body = data.model
     const dark = standard('#202636', 0.55, 0.35)
-    const glass = standard('#4d899c', 0.25, 0.35)
+    const glassMat = standard('#4d899c', 0.25, 0.35)
     const chrome = standard('#c9d7da', 0.28, 0.8)
     const low = variant === 'sport'
     const wide = variant === 'muscle'
-    const length = wide ? 4.35 : 4.15
-    const width = wide ? 2.08 : 2.0
-    box(body, width, low ? 0.52 : 0.65, length, 0, low ? 0.66 : 0.73, 0, data.paint)
+    const compact = variant === 'compact'
+    const length = wide ? 4.35 : compact ? 3.7 : 4.15
+    const width = wide ? 2.08 : compact ? 1.88 : 2.0
+    const bodyH = low ? 0.52 : 0.65
+
+    // Segmented deformable main chassis shell
+    const chassisGeo = new THREE.BoxGeometry(width, bodyH, length, 5, 4, 6)
+    const chassisMesh = new THREE.Mesh(chassisGeo, data.paint)
+    chassisMesh.position.set(0, low ? 0.66 : 0.73, 0)
+    body.add(chassisMesh)
+    data.deformableBody = {
+      mesh: chassisMesh,
+      basePositions: new Float32Array(chassisGeo.getAttribute('position').array as Float32Array),
+      halfW: width * 0.5,
+      halfH: bodyH * 0.5,
+      halfD: length * 0.5,
+    }
+
     box(body, width * 0.92, 0.18, length * 0.97, 0, 0.42, 0, dark)
-    const hood = box(body, width * 0.92, 0.12, 1.10, 0, low ? 0.99 : 1.11, -1.38, data.paint)
-    data.panels.push(hood)
+
+    // Hinged hood that can pop open and flap before detaching
+    const hoodPivot = new THREE.Group()
+    hoodPivot.position.set(0, low ? 0.99 : 1.11, -0.82)
+    const hoodMesh = box(hoodPivot, width * 0.92, 0.12, 1.12, 0, 0, -0.56, data.paint)
+    body.add(hoodPivot)
+    data.hoodPivot = hoodPivot
+    data.panels.push(hoodMesh)
+
     const roofY = low ? 1.30 : 1.48
-    box(body, width * 0.78, low ? 0.48 : 0.62, 1.93, 0, roofY, 0.17, glass)
+    const windshield = box(body, width * 0.78, low ? 0.48 : 0.62, 1.93, 0, roofY, 0.17, glassMat)
+    data.windshieldMesh = windshield
+    data.windshieldMaterial = glassMat
     box(body, width * 0.81, 0.12, 1.75, 0, roofY + (low ? 0.26 : 0.33), 0.2, data.paint)
     box(body, 0.08, low ? 0.5 : 0.62, 1.92, -width * 0.34, roofY, 0.17, dark)
     box(body, 0.08, low ? 0.5 : 0.62, 1.92, width * 0.34, roofY, 0.17, dark)
     const panel = box(body, 0.06, 0.38, 1.35, width / 2 + 0.01, 0.77, 0.25, data.paint)
     data.panels.push(panel)
-    box(body, width, 0.16, 0.12, 0, 0.48, -length / 2 - 0.01, chrome)
-    box(body, width, 0.16, 0.12, 0, 0.48, length / 2 + 0.01, chrome)
-    this.lights(body, width, length / 2, 0.83, data.brakeLight)
+
+    const frontBumper = box(body, width, 0.16, 0.14, 0, 0.48, -length / 2 - 0.02, chrome)
+    const rearBumper = box(body, width, 0.16, 0.14, 0, 0.48, length / 2 + 0.02, chrome)
+    data.frontBumper = frontBumper
+    data.rearBumper = rearBumper
+    data.panels.push(frontBumper, rearBumper)
+
+    if (variant === 'taxi') {
+      box(body, 0.58, 0.2, 0.28, 0, roofY + 0.44, 0.2, lamp('#ffe26a'))
+    }
+    this.lights(data, body, width, length / 2, 0.83, data.brakeLight)
     for (const x of [-width / 2, width / 2]) for (const z of [-1.27, 1.3]) this.addWheel(data, x, 0.42, z, 0.42, z < 0)
     if (low) {
       box(body, width * 0.95, 0.09, 0.33, 0, 1.32, 1.84, dark)
@@ -679,23 +1314,76 @@ export class VehicleSystem {
     }
   }
 
+  private buildSuv(data: VehicleParts): void {
+    const body = data.model
+    const dark = standard('#1c2026', 0.6, 0.25)
+    const glassMat = standard('#4b7a8a', 0.25, 0.32)
+    const chrome = standard('#b8c6cc', 0.3, 0.78)
+    const width = 2.24
+    const length = 4.65
+    const chassisGeo = new THREE.BoxGeometry(width, 0.88, length, 5, 4, 6)
+    const chassisMesh = new THREE.Mesh(chassisGeo, data.paint)
+    chassisMesh.position.set(0, 0.92, 0)
+    body.add(chassisMesh)
+    data.deformableBody = {
+      mesh: chassisMesh,
+      basePositions: new Float32Array(chassisGeo.getAttribute('position').array as Float32Array),
+      halfW: width * 0.5,
+      halfH: 0.44,
+      halfD: length * 0.5,
+    }
+    box(body, width * 0.92, 0.22, length * 0.96, 0, 0.48, 0, dark)
+    const hoodPivot = new THREE.Group()
+    hoodPivot.position.set(0, 1.36, -1.1)
+    const hoodMesh = box(hoodPivot, width * 0.9, 0.12, 1.1, 0, 0, -0.55, data.paint)
+    body.add(hoodPivot)
+    data.hoodPivot = hoodPivot
+    data.panels.push(hoodMesh)
+
+    const windshield = box(body, width * 0.88, 0.74, 2.7, 0, 1.72, 0.42, glassMat)
+    data.windshieldMesh = windshield
+    data.windshieldMaterial = glassMat
+    box(body, width * 0.9, 0.14, 2.65, 0, 2.12, 0.44, data.paint)
+    const frontBumper = box(body, width + 0.06, 0.2, 0.16, 0, 0.54, -length / 2 - 0.02, chrome)
+    const rearBumper = box(body, width + 0.06, 0.2, 0.16, 0, 0.54, length / 2 + 0.02, chrome)
+    data.frontBumper = frontBumper
+    data.rearBumper = rearBumper
+    data.panels.push(frontBumper, rearBumper)
+    this.lights(data, body, width, length / 2, 1.0, data.brakeLight)
+    for (const x of [-width / 2, width / 2]) for (const z of [-1.48, 1.48]) this.addWheel(data, x, 0.49, z, 0.49, z < 0)
+  }
+
   private buildTruck(data: VehicleParts): void {
     const body = data.model
     const dark = standard('#262a31', 0.7, 0.2)
-    const glass = standard('#56889a', 0.25, 0.3)
+    const glassMat = standard('#56889a', 0.25, 0.3)
     const chrome = standard('#b6c3c8', 0.35, 0.7)
     box(body, 2.28, 0.5, 5.4, 0, 0.67, 0, dark)
-    box(body, 2.22, 1.0, 2.16, 0, 1.05, -1.53, data.paint)
-    box(body, 2.04, 0.85, 1.28, 0, 1.82, -1.47, glass)
+    const cabGeo = new THREE.BoxGeometry(2.22, 1.0, 2.16, 4, 3, 4)
+    const cabMesh = new THREE.Mesh(cabGeo, data.paint)
+    cabMesh.position.set(0, 1.05, -1.53)
+    body.add(cabMesh)
+    data.deformableBody = {
+      mesh: cabMesh,
+      basePositions: new Float32Array(cabGeo.getAttribute('position').array as Float32Array),
+      halfW: 1.11,
+      halfH: 0.5,
+      halfD: 1.08,
+    }
+    const windshield = box(body, 2.04, 0.85, 1.28, 0, 1.82, -1.47, glassMat)
+    data.windshieldMesh = windshield
+    data.windshieldMaterial = glassMat
     box(body, 2.16, 0.14, 1.5, 0, 2.27, -1.47, data.paint)
     box(body, 2.2, 0.22, 2.7, 0, 0.91, 1.20, data.paint)
     const left = box(body, 0.18, 0.9, 2.7, -1.02, 1.42, 1.2, data.paint)
     const right = box(body, 0.18, 0.9, 2.7, 1.02, 1.42, 1.2, data.paint)
     box(body, 2.04, 0.8, 0.16, 0, 1.37, 2.5, data.paint)
     data.panels.push(right, left)
-    box(body, 2.34, 0.2, 0.13, 0, 0.55, -2.75, chrome)
+    const frontBumper = box(body, 2.34, 0.2, 0.13, 0, 0.55, -2.75, chrome)
+    data.frontBumper = frontBumper
+    data.panels.push(frontBumper)
     box(body, 1.05, 0.35, 0.09, 0, 1.02, -2.65, dark)
-    this.lights(body, 2.16, 2.7, 1.16, data.brakeLight)
+    this.lights(data, body, 2.16, 2.7, 1.16, data.brakeLight)
     for (const x of [-1.12, 1.12]) for (const z of [-1.75, 1.65]) this.addWheel(data, x, 0.51, z, 0.51, z < 0)
   }
 
@@ -714,8 +1402,8 @@ export class VehicleSystem {
     data.panels.push(seat)
     bar(body, new THREE.Vector3(0, 0.5, -1.05), new THREE.Vector3(0, 1.42, -0.75), 0.065, metal)
     box(body, 1.05, 0.07, 0.07, 0, 1.43, -0.75, metal)
-    box(body, 0.43, 0.24, 0.12, 0, 1.12, -1.11, lamp('#fff2b2'))
-    box(body, 0.34, 0.12, 0.1, 0, 1.03, 1.14, data.brakeLight)
+    data.leftHeadlight = box(body, 0.43, 0.24, 0.12, 0, 1.12, -1.11, lamp('#fff2b2'))
+    data.leftTaillight = box(body, 0.34, 0.12, 0.1, 0, 1.03, 1.14, data.brakeLight)
   }
 
   private buildBoat(data: VehicleParts): void {
@@ -801,20 +1489,31 @@ export class VehicleSystem {
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.53, radius * 0.53, 0.32, 10), standard('#bbc7cd', 0.32, 0.75))
     hub.rotation.z = Math.PI / 2
     spin.add(hub)
-    // A small dark spoke makes rotation apparent even at low speed.
     const spoke = box(spin, 0.34, radius * 0.12, radius * 0.75, 0, 0, 0, standard('#323b43', 0.5, 0.6))
     spoke.position.x = 0.17
     pivot.add(spin)
     data.model.add(pivot)
-    data.wheels.push({ spin, steering: front ? pivot : null, radius })
+    data.wheels.push({
+      pivot,
+      spin,
+      steering: front ? pivot : null,
+      radius,
+      restY: y,
+      compression: 0,
+      vel: 0,
+      sideSign: x < 0 ? -1 : x > 0 ? 1 : 0,
+      front,
+      bentYaw: 0,
+      bentCamber: 0,
+    })
   }
 
-  private lights(body: THREE.Group, width: number, halfLength: number, y: number, brake: THREE.MeshStandardMaterial): void {
+  private lights(data: VehicleParts, body: THREE.Group, width: number, halfLength: number, y: number, brake: THREE.MeshStandardMaterial): void {
     const head = lamp('#fff1bc')
-    for (const x of [-width * 0.33, width * 0.33]) {
-      box(body, width * 0.22, 0.16, 0.08, x, y, -halfLength - 0.045, head)
-      box(body, width * 0.22, 0.14, 0.08, x, y, halfLength + 0.045, brake)
-    }
+    data.leftHeadlight = box(body, width * 0.22, 0.16, 0.08, -width * 0.33, y, -halfLength - 0.045, head)
+    data.rightHeadlight = box(body, width * 0.22, 0.16, 0.08, width * 0.33, y, -halfLength - 0.045, head)
+    data.leftTaillight = box(body, width * 0.22, 0.14, 0.08, -width * 0.33, y, halfLength + 0.045, brake)
+    data.rightTaillight = box(body, width * 0.22, 0.14, 0.08, width * 0.33, y, halfLength + 0.045, brake)
   }
 }
 
@@ -860,6 +1559,41 @@ function makeContactShadowTexture(): THREE.Texture {
     grad.addColorStop(1, 'rgba(6, 8, 14, 0)')
     ctx.fillStyle = grad
     ctx.fillRect(0, 0, 64, 64)
+  }
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
+function makeCrackedGlassTexture(): THREE.Texture {
+  if (typeof document === 'undefined') {
+    const data = new Uint8Array([200, 225, 240, 200])
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat)
+    tex.needsUpdate = true
+    return tex
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = 128
+  canvas.height = 64
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    ctx.fillStyle = '#5f8b9c'
+    ctx.fillRect(0, 0, 128, 64)
+    ctx.strokeStyle = 'rgba(242, 248, 255, 0.85)'
+    ctx.lineWidth = 1.4
+    const cx = 64
+    const cy = 32
+    for (let i = 0; i < 14; i += 1) {
+      const a = (i / 14) * Math.PI * 2
+      ctx.beginPath()
+      ctx.moveTo(cx, cy)
+      ctx.lineTo(cx + Math.cos(a) * 58, cy + Math.sin(a) * 30)
+      ctx.stroke()
+    }
+    ctx.beginPath()
+    ctx.arc(cx, cy, 12, 0, Math.PI * 2)
+    ctx.arc(cx, cy, 24, 0, Math.PI * 2)
+    ctx.stroke()
   }
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace

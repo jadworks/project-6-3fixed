@@ -1,22 +1,42 @@
+export type AudioTelemetryOpts = {
+  approachSpeed?: number
+  pursuerDist?: number
+  engineStalled?: boolean
+  cranking?: boolean
+  turbo?: boolean
+  rpmRatio?: number
+}
+
 export class ViceAudio {
   private context?: AudioContext
   private master?: GainNode
   private engine?: OscillatorNode
+  private engineSub?: OscillatorNode
+  private engineFilter?: BiquadFilterNode
   private engineGain?: GainNode
   private siren?: OscillatorNode
   private sirenGain?: GainNode
   private nextBeat = 0
   private beat = 0
   private cutsceneActive = false
+  private prevThrottleSpeed = 0
   muted = false
 
   unlock(): void {
     if (!this.context) {
       const c = new AudioContext(); this.context = c
       const master = c.createGain(); master.gain.value = this.muted ? 0 : .17; master.connect(c.destination); this.master = master
-      const engine = c.createOscillator(), engineGain = c.createGain()
-      engine.type = 'sawtooth'; engine.frequency.value = 55; engineGain.gain.value = 0
-      engine.connect(engineGain).connect(master); engine.start(); this.engine = engine; this.engineGain = engineGain
+      const engine = c.createOscillator(), engineSub = c.createOscillator(), engineFilter = c.createBiquadFilter(), engineGain = c.createGain()
+      engine.type = 'sawtooth'; engine.frequency.value = 58
+      engineSub.type = 'triangle'; engineSub.frequency.value = 34
+      engineFilter.type = 'lowpass'; engineFilter.frequency.value = 320; engineFilter.Q.value = 2.4
+      engineGain.gain.value = 0
+      engine.connect(engineFilter)
+      engineSub.connect(engineFilter)
+      engineFilter.connect(engineGain).connect(master)
+      engine.start(); engineSub.start()
+      this.engine = engine; this.engineSub = engineSub; this.engineFilter = engineFilter; this.engineGain = engineGain
+
       const siren = c.createOscillator(), sirenGain = c.createGain()
       siren.type = 'triangle'; siren.frequency.value = 660; sirenGain.gain.value = 0
       siren.connect(sirenGain).connect(master); siren.start(); this.siren = siren; this.sirenGain = sirenGain
@@ -38,14 +58,48 @@ export class ViceAudio {
     this.cutsceneActive = active
   }
 
-  update(speed: number, inVehicle: boolean, wanted: number, playing: boolean, inSight = true): void {
+  update(
+    speed: number,
+    inVehicle: boolean,
+    wanted: number,
+    playing: boolean,
+    inSight = true,
+    opts: AudioTelemetryOpts = {},
+  ): void {
     const c = this.context
-    if (!c || !this.engine || !this.engineGain || !this.siren || !this.sirenGain) return
+    if (!c || !this.engine || !this.engineSub || !this.engineFilter || !this.engineGain || !this.siren || !this.sirenGain) return
     const t = c.currentTime
-    this.engine.frequency.setTargetAtTime(48 + Math.min(145, Math.abs(speed) * 3.3), t, .08)
-    this.engineGain.gain.setTargetAtTime(playing && inVehicle ? .17 : 0, t, .12)
-    this.siren.frequency.setTargetAtTime(620 + 220 * (.5 + .5 * Math.sin(t * (inSight ? 5.2 + wanted * 0.35 : 2.8))), t, .04)
-    this.sirenGain.gain.setTargetAtTime(playing && wanted > 0 ? (inSight ? Math.min(0.075, .042 + wanted * 0.005) : .018) : 0, t, .1)
+    const absSpd = Math.abs(speed)
+    const stalled = Boolean(opts.engineStalled)
+    const cranking = Boolean(opts.cranking)
+
+    // Dual-harmonic V8 idle rumble + speed/RPM harmonic climb
+    const baseHz = cranking ? 26 + (Math.sin(t * 24) * 6) : stalled ? 0 : 42 + Math.min(138, absSpd * 3.1)
+    this.engine.frequency.setTargetAtTime(Math.max(24, baseHz), t, .06)
+    this.engineSub.frequency.setTargetAtTime(Math.max(18, baseHz * 0.56), t, .06)
+    this.engineFilter.frequency.setTargetAtTime(stalled ? 120 : 210 + Math.min(1100, absSpd * 28), t, .08)
+    const engVol = !playing || !inVehicle ? 0 : stalled && !cranking ? 0 : cranking ? .12 : .16
+    this.engineGain.gain.setTargetAtTime(engVol, t, .09)
+
+    // Turbo blowoff chirp when lifting off high-speed boost/throttle
+    if (playing && inVehicle && opts.turbo && this.prevThrottleSpeed > 22 && absSpd < this.prevThrottleSpeed - 1.2 && Math.random() < 0.14) {
+      this.turboBlowoff()
+    }
+    this.prevThrottleSpeed = absSpd
+
+    // Doppler-shifted dual-tone police siren
+    const approach = Math.max(-25, Math.min(25, opts.approachSpeed ?? 0))
+    const doppler = 1 + approach * 0.0085
+    const dist = opts.pursuerDist ?? 40
+    const distAtten = Number.isFinite(dist) ? Math.max(0.22, Math.min(1.0, 1.15 - dist / 120)) : 0.25
+    const wail = (Math.floor(t * (inSight ? 2.4 : 1.4)) % 2 === 0 ? 640 : 815) * doppler
+    const yelp = (620 + 210 * (.5 + .5 * Math.sin(t * (inSight ? 5.6 + wanted * 0.35 : 2.8)))) * doppler
+    this.siren.frequency.setTargetAtTime(wanted >= 3 && inSight ? yelp : wail, t, .035)
+    const sirenVol = playing && wanted > 0
+      ? (inSight ? Math.min(0.085, (.042 + wanted * 0.005) * distAtten) : .022 * distAtten)
+      : 0
+    this.sirenGain.gain.setTargetAtTime(sirenVol, t, .1)
+
     if ((playing || this.cutsceneActive) && t >= this.nextBeat) {
       this.nextBeat = t + (this.cutsceneActive ? .36 : .29)
       const notes = this.cutsceneActive
@@ -64,6 +118,83 @@ export class ViceAudio {
     osc.type = 'triangle'; osc.frequency.setValueAtTime(frequency, t)
     gain.gain.setValueAtTime(volume, t); gain.gain.exponentialRampToValueAtTime(.001, t + duration)
     osc.connect(gain).connect(this.master); osc.start(t); osc.stop(t + duration)
+  }
+
+  turboBlowoff(): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime, dur = 0.16
+    const n = Math.floor(c.sampleRate * dur), buf = c.createBuffer(1, n, c.sampleRate), ch = buf.getChannelData(0)
+    for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / n)
+    const src = c.createBufferSource(), hp = c.createBiquadFilter(), g = c.createGain()
+    src.buffer = buf; hp.type = 'bandpass'; hp.frequency.setValueAtTime(3400, t); hp.frequency.exponentialRampToValueAtTime(1400, t + dur); hp.Q.value = 3.2
+    g.gain.setValueAtTime(0.14, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+    src.connect(hp).connect(g).connect(this.master); src.start(t)
+  }
+
+  suspensionCreak(intensity = 0.6): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime
+    const osc = c.createOscillator(), g = c.createGain()
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(115, t)
+    osc.frequency.exponentialRampToValueAtTime(52, t + 0.12)
+    g.gain.setValueAtTime(Math.min(0.18, 0.06 + intensity * 0.1), t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.13)
+    osc.connect(g).connect(this.master); osc.start(t); osc.stop(t + 0.14)
+  }
+
+  crashSynth(strength = 10, glassShatter = false): void {
+    if (this.muted || !this.context || !this.master) return
+    const c = this.context, t = c.currentTime
+    const dur = Math.min(0.38, 0.16 + strength * 0.01)
+    const n = Math.floor(c.sampleRate * dur), buf = c.createBuffer(1, n, c.sampleRate), ch = buf.getChannelData(0)
+    for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 1.5)
+    const src = c.createBufferSource(), bp = c.createBiquadFilter(), g = c.createGain()
+    src.buffer = buf; bp.type = 'bandpass'; bp.frequency.setValueAtTime(640, t); bp.Q.value = 1.6
+    g.gain.setValueAtTime(Math.min(0.7, 0.25 + strength * 0.03), t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+    src.connect(bp).connect(g).connect(this.master); src.start(t)
+    this.note(58, 0.2, Math.min(0.28, 0.1 + strength * 0.012))
+    if (glassShatter) {
+      for (let i = 0; i < 4; i++) {
+        window.setTimeout(() => this.note(2200 + i * 540 + Math.random() * 420, 0.055, 0.075), i * 24)
+      }
+    }
+  }
+
+  starterCrank(success = false): void {
+    if (this.muted || !this.context || !this.master) return
+    this.note(72, 0.09, 0.12)
+    window.setTimeout(() => this.note(68, 0.09, 0.11), 95)
+    if (success) window.setTimeout(() => this.note(132, 0.16, 0.14), 195)
+  }
+
+  phoneTone(kind: 'beep' | 'ring' | 'shutter' | 'respray' | 'hotdog'): void {
+    if (this.muted) return
+    if (kind === 'beep') {
+      this.note(920, 0.045, 0.06)
+    } else if (kind === 'ring') {
+      this.note(1046.5, 0.09, 0.08)
+      window.setTimeout(() => this.note(1318.5, 0.09, 0.08), 110)
+      window.setTimeout(() => this.note(1568, 0.12, 0.08), 220)
+    } else if (kind === 'shutter') {
+      this.note(1720, 0.03, 0.09)
+      window.setTimeout(() => this.note(640, 0.04, 0.06), 45)
+    } else if (kind === 'respray') {
+      if (this.context && this.master) {
+        const c = this.context, t = c.currentTime, dur = 0.36
+        const n = Math.floor(c.sampleRate * dur), buf = c.createBuffer(1, n, c.sampleRate), ch = buf.getChannelData(0)
+        for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * 0.4
+        const src = c.createBufferSource(), hp = c.createBiquadFilter(), g = c.createGain()
+        src.buffer = buf; hp.type = 'highpass'; hp.frequency.setValueAtTime(2200, t)
+        g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+        src.connect(hp).connect(g).connect(this.master); src.start(t)
+      }
+      window.setTimeout(() => this.note(587.3, 0.14, 0.09), 260)
+    } else {
+      this.note(523.25, 0.08, 0.08)
+      window.setTimeout(() => this.note(659.25, 0.11, 0.08), 80)
+    }
   }
 
   /** Subtle procedural vocal cadence syllable for animated character dialogue. */
@@ -85,7 +216,6 @@ export class ViceAudio {
   dispatchRadio(level: number): void {
     if (this.muted || !this.context || !this.master) return
     const c = this.context, t = c.currentTime
-    // Short VHF squelch burst
     const n = Math.floor(c.sampleRate * 0.08)
     const buf = c.createBuffer(1, n, c.sampleRate)
     const ch = buf.getChannelData(0)
@@ -94,7 +224,6 @@ export class ViceAudio {
     src.buffer = buf; bp.type = 'bandpass'; bp.frequency.setValueAtTime(2100, t); bp.Q.setValueAtTime(3.2, t)
     g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08)
     src.connect(bp).connect(g).connect(this.master); src.start(t)
-    // Dual-tone dispatch chirp
     const base = level >= 6 ? 1240 : level >= 3 ? 1080 : 940
     this.note(base, .07, .075)
     window.setTimeout(() => this.note(base * 1.32, .11, .08), 85)
