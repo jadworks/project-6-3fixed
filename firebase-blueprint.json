@@ -19,7 +19,15 @@
         },
         "money": {
           "type": "number",
-          "description": "In-game cash balance."
+          "description": "In-game cash on hand."
+        },
+        "bankBalance": {
+          "type": "number",
+          "description": "Protected BuckMe bank account balance."
+        },
+        "uncleanedLoot": {
+          "type": "number",
+          "description": "Uncleaned stolen goods awaiting fencing."
         },
         "health": {
           "type": "number",
@@ -40,7 +48,7 @@
         "weather": {
           "type": "string",
           "description": "Selected city atmosphere preset.",
-          "enum": ["day", "sunset", "rain", "night"]
+          "enum": ["day", "sunset", "overcast", "haze", "fog", "rain", "storm", "night"]
         },
         "robbedStores": {
           "type": "array",
@@ -49,6 +57,35 @@
         "seenIntro": {
           "type": "boolean",
           "description": "Whether the opening 2-minute cutscene has been watched."
+        },
+        "protagonist": {
+          "type": "string",
+          "description": "Active playable protagonist (jason or lucia).",
+          "enum": ["jason", "lucia"]
+        },
+        "partnerBond": {
+          "type": "number",
+          "description": "Partner synergy and bond meter (0-100)."
+        },
+        "conductScore": {
+          "type": "number",
+          "description": "Criminal conduct profile score (-100 to 100)."
+        },
+        "fuelEnabled": {
+          "type": "boolean",
+          "description": "Whether fuel/EV battery consumption is active."
+        },
+        "trunkWeapons": {
+          "type": "array",
+          "description": "Weapon IDs stored in the personal vehicle trunk."
+        },
+        "tattoos": {
+          "type": "array",
+          "description": "Unlocked tattoo design IDs."
+        },
+        "hairstyle": {
+          "type": "string",
+          "description": "Selected hairstyle name."
         },
         "position": {
           "type": "object",

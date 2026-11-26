@@ -94,8 +94,9 @@ service cloud.firestore {
           'muted', 'weather', 'robbedStores', 'seenIntro', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'uid', 'displayName', 'money', 'health', 'completed', 'upgrade',
+          'uid', 'displayName', 'money', 'bankBalance', 'uncleanedLoot', 'health', 'completed', 'upgrade',
           'muted', 'weather', 'robbedStores', 'seenIntro',
+          'protagonist', 'partnerBond', 'conductScore', 'fuelEnabled', 'trunkWeapons', 'tattoos', 'hairstyle',
           'position', 'inventory', 'heat', 'rpgStats', 'weaponArsenal', 'capturedTurfs',
           'createdAt', 'updatedAt'
         ])
@@ -107,6 +108,8 @@ service cloud.firestore {
         && data.money is int
         && data.money >= 0
         && data.money <= 1000000000
+        && (!('bankBalance' in data) || (data.bankBalance is int && data.bankBalance >= 0 && data.bankBalance <= 1000000000))
+        && (!('uncleanedLoot' in data) || (data.uncleanedLoot is int && data.uncleanedLoot >= 0 && data.uncleanedLoot <= 1000000000))
         && (data.health is int || data.health is float)
         && data.health >= 0
         && data.health <= 100
@@ -119,11 +122,18 @@ service cloud.firestore {
         && data.muted is bool
         && data.weather is string
         && data.weather.size() <= 16
-        && data.weather in ['day', 'sunset', 'rain', 'night']
+        && data.weather in ['day', 'sunset', 'overcast', 'haze', 'fog', 'rain', 'storm', 'night']
         && data.robbedStores is list
-        && data.robbedStores.size() <= 10
+        && data.robbedStores.size() <= 24
         && (data.robbedStores.size() == 0 || (data.robbedStores[0] is string && data.robbedStores[0].size() >= 1 && data.robbedStores[0].size() <= 32))
         && data.seenIntro is bool
+        && (!('protagonist' in data) || (data.protagonist is string && data.protagonist in ['jason', 'lucia']))
+        && (!('partnerBond' in data) || ((data.partnerBond is int || data.partnerBond is float) && data.partnerBond >= 0 && data.partnerBond <= 100))
+        && (!('conductScore' in data) || ((data.conductScore is int || data.conductScore is float) && data.conductScore >= -100 && data.conductScore <= 100))
+        && (!('fuelEnabled' in data) || data.fuelEnabled is bool)
+        && (!('trunkWeapons' in data) || (data.trunkWeapons is list && data.trunkWeapons.size() <= 16 && (data.trunkWeapons.size() == 0 || (data.trunkWeapons[0] is string && data.trunkWeapons[0].size() >= 1 && data.trunkWeapons[0].size() <= 24))))
+        && (!('tattoos' in data) || (data.tattoos is list && data.tattoos.size() <= 10 && (data.tattoos.size() == 0 || (data.tattoos[0] is string && data.tattoos[0].size() >= 1 && data.tattoos[0].size() <= 32))))
+        && (!('hairstyle' in data) || (data.hairstyle is string && data.hairstyle.size() >= 1 && data.hairstyle.size() <= 24))
         && (!('position' in data) || isValidPosition(data.position))
         && (!('inventory' in data) || isValidInventory(data.inventory))
         && (!('heat' in data) || isValidHeat(data.heat))
@@ -184,8 +194,9 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'displayName', 'money', 'health', 'completed', 'upgrade',
+          'displayName', 'money', 'bankBalance', 'uncleanedLoot', 'health', 'completed', 'upgrade',
           'muted', 'weather', 'robbedStores', 'seenIntro',
+          'protagonist', 'partnerBond', 'conductScore', 'fuelEnabled', 'trunkWeapons', 'tattoos', 'hairstyle',
           'position', 'inventory', 'heat', 'rpgStats', 'weaponArsenal', 'capturedTurfs', 'updatedAt'
         ]);
       allow delete: if false;

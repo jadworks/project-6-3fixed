@@ -54,6 +54,13 @@ export const DEFAULT_CONFIG = {
     rageSpeed: 5,
     rageAt: 45,
   },
+  police: {
+    /** Configurable dispatch latency (5-10s window) before initial patrol units arrive and engage. */
+    dispatchLatencySeconds: 6.5,
+    highHeatDispatchLatencySeconds: 5.0,
+    /** Civilian witness 911 phone-call duration before dispatch triggers. */
+    witnessReportSeconds: 3.5,
+  },
 } as const
 
 // Gameplay always reads active values here. Source defaults remain immutable for

@@ -1,8 +1,9 @@
 import * as THREE from 'three'
 import { createFacadeMaterial, createRainMaterial, createSkyMaterial, createWaterMaterial, type FacadeControls } from './shaders'
 import { createSignTexture, createSurfaceTexture } from './textures'
+import { STORES_CATALOG } from './storesCatalog'
 
-export type ViceWeather = 'day' | 'sunset' | 'rain' | 'night' | 'overcast'
+export type ViceWeather = 'day' | 'sunset' | 'overcast' | 'haze' | 'fog' | 'rain' | 'storm' | 'night'
 export type ViceSurface = 'asphalt' | 'wet' | 'sand' | 'dirt' | 'water'
 
 /** Optional metadata for a game to create its own physics and interactions. */
@@ -33,7 +34,10 @@ const ATMOSPHERES: Record<ViceWeather, Atmosphere> = {
   day: { top: '#5ab6d9', horizon: '#f9d3b9', sun: '#fff1d2', ground: '#786c65', ambient: 1.35, sunlight: 2.35, fogNear: 145, fogFar: 560, night: 0, rain: 0, sunGlow: 0.85 },
   sunset: { top: '#6d5ea5', horizon: '#ff9d7b', sun: '#ffaa6c', ground: '#6f506b', ambient: 1.0, sunlight: 1.95, fogNear: 120, fogFar: 520, night: 0.42, rain: 0, sunGlow: 1.25 },
   overcast: { top: '#68737d', horizon: '#9aa4ac', sun: '#cad0d4', ground: '#4a5155', ambient: 0.94, sunlight: 1.02, fogNear: 72, fogFar: 300, night: 0.34, rain: 0.32, sunGlow: 0.08 },
+  haze: { top: '#8bb8c8', horizon: '#f3caa6', sun: '#ffe3b5', ground: '#776758', ambient: 1.16, sunlight: 1.68, fogNear: 58, fogFar: 240, night: 0.14, rain: 0, sunGlow: 0.55 },
+  fog: { top: '#94a2ab', horizon: '#bec8ce', sun: '#dce3e8', ground: '#636c71', ambient: 0.98, sunlight: 0.85, fogNear: 28, fogFar: 135, night: 0.24, rain: 0.15, sunGlow: 0.05 },
   rain: { top: '#5a6f7c', horizon: '#8b9ba0', sun: '#cbd6df', ground: '#435053', ambient: 0.86, sunlight: 0.95, fogNear: 74, fogFar: 320, night: 0.32, rain: 1, sunGlow: 0.14 },
+  storm: { top: '#253145', horizon: '#455466', sun: '#b5ccf0', ground: '#27303b', ambient: 0.62, sunlight: 0.65, fogNear: 46, fogFar: 195, night: 0.68, rain: 1.35, sunGlow: 0.06 },
   night: { top: '#0e1639', horizon: '#2b3962', sun: '#8eb0ff', ground: '#1e223c', ambient: 0.52, sunlight: 0.78, fogNear: 110, fogFar: 480, night: 1, rain: 0, sunGlow: 0.18 },
 }
 
@@ -247,7 +251,12 @@ export class ViceWorld {
     if (this.waterMaterial.uniforms.uSky) colorTo(this.waterMaterial.uniforms.uSky.value as THREE.Color, target.horizon)
     this.skyMaterial.uniforms.uSunStrength.value = THREE.MathUtils.lerp(this.skyMaterial.uniforms.uSunStrength.value as number, target.sunGlow, blend)
     this.rainMaterial.uniforms.uTime.value = this.time
-    this.rain.visible = weather === 'rain' && this.facadeControls.rain.value > 0.08
+    const stormPulse = weather === 'storm' && Math.sin(this.time * 1.9) > 0.985 && Math.cos(this.time * 17) > 0.3 ? 1.8 : 0
+    if (stormPulse > 0) {
+      this.sun.intensity += stormPulse
+      this.ambient.intensity += stormPulse * 0.45
+    }
+    this.rain.visible = (weather === 'rain' || weather === 'storm') && this.facadeControls.rain.value > 0.08
     this.rain.position.set(player.x, player.y, player.z)
     this.sky.position.copy(player)
     // Snap directional shadow target to texel grid to eliminate shadow swimming during camera movement.
@@ -290,7 +299,7 @@ export class ViceWorld {
   public surfaceAt(x: number, z: number): ViceSurface {
     const road = LONG_STREETS.some(street => Math.abs(x - street.x) <= street.width / 2)
       || (x >= -BOUNDS && x <= 50 && CROSS_STREETS.some(street => Math.abs(z - street) <= 7))
-    if (road || (z > 110 && x >= 55 && x <= 85)) return (this.weather === 'rain' || this.weather === 'overcast') ? 'wet' : 'asphalt'
+    if (road || (z > 110 && x >= 55 && x <= 85)) return (this.weather === 'rain' || this.weather === 'storm' || this.weather === 'overcast') ? 'wet' : 'asphalt'
     if ((x >= 60 && x <= 66 && z <= 110) || (x >= 63 && x <= 142 && Math.abs(z + 8) <= 4)) return 'dirt'
     if (x > 85) return 'water'
     if (x >= 55) return 'sand'
@@ -415,25 +424,16 @@ export class ViceWorld {
   }
 
   private makeStores(): void {
-    const stores: Array<[string, string, number, string]> = [
-      ['sunset-mart', 'SUNSET MART', -176, '#f08b62'],
-      ['neon-thread', 'NEON THREADS', -88, '#eb70b7'],
-      ['bay-guns', 'BAY GEAR', 0, '#65d4dc'],
-      ['palms-electronics', 'PALMS ELECTRONICS', 88, '#f1c85b'],
-      ['dockside-goods', 'DOCKSIDE GOODS', 176, '#8fd09c'],
-    ]
-    for (const [id, name, z, color] of stores) {
-      const x = 49
-      const width = 10
-      const depth = 8
-      const height = 5.8
-      this.addBuilding(x, z, width, depth, height, color)
-      const front = x - width / 2 - 0.08
-      this.trims.add(front - 0.5, 3.65, z, 0.18, 3.9, depth - 0.6, '#27343d')
-      this.trims.add(front - 0.7, 3.0, z, 0.2, 0.2, depth - 0.8, color)
-      this.pinkLights.add(front - 0.82, 5.1, z, 0.12, 0.18, depth - 0.6, '#ffffff')
-      this.sign(name, front - 0.3, 5.2, z, 7.6, Math.PI / 2, true)
-      this.stores.push({ id, name, position: new THREE.Vector3(front - 1.6, 0, z), radius: 6.5, reward: 450 + this.stores.length * 125 })
+    // All 20 enterable walk-in 3D stores are built by StoreWorld from STORES_CATALOG;
+    // keep ViceWorld.stores synced with exact world coordinates & rewards.
+    for (const spec of STORES_CATALOG) {
+      this.stores.push({
+        id: spec.id,
+        name: spec.name,
+        position: new THREE.Vector3(spec.x, 0, spec.z),
+        radius: 5.5,
+        reward: spec.registerReward,
+      })
     }
   }
   private makeHotels(): void {

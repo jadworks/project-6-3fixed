@@ -17,6 +17,9 @@ import {
   type PlayerHeatSave,
   type PlayerInventory,
   type PlayerPosition,
+  clearPendingCloudSync,
+  hasPendingCloudSync,
+  markPendingCloudSync,
   sanitizeCapturedTurfs,
   sanitizeHeatSave,
   sanitizeInventory,
@@ -48,6 +51,24 @@ export type PlayerStateSnapshot = {
 
 const VALID_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const VALID_MISSION = /^[a-zA-Z0-9_-]{1,32}$/
+
+const TRANSIENT_CODES = new Set([
+  'unavailable',
+  'deadline-exceeded',
+  'aborted',
+  'resource-exhausted',
+  'cancelled',
+  'failed-precondition',
+])
+
+export function isTransientFirestoreError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const rec = error as { code?: unknown; message?: unknown }
+  const code = typeof rec.code === 'string' ? rec.code.replace(/^firestore\//, '').toLowerCase() : ''
+  if (TRANSIENT_CODES.has(code)) return true
+  const msg = typeof rec.message === 'string' ? rec.message.toLowerCase() : ''
+  return msg.includes('offline') || msg.includes('network') || msg.includes('failed to fetch')
+}
 
 function sanitizeDisplayName(raw: string | null | undefined, maxLen: number): string {
   const cleaned = (raw ?? 'VICE PLAYER').replace(/\s+/g, ' ').trim()
@@ -133,6 +154,10 @@ export async function loadCloudPlayerSave(uid: string): Promise<Partial<CitySave
       protagonist: data.protagonist === 'lucia' ? 'lucia' : 'jason',
       partnerBond: typeof data.partnerBond === 'number' && Number.isFinite(data.partnerBond) ? Math.min(100, Math.max(0, data.partnerBond)) : 32,
       conductScore: typeof data.conductScore === 'number' && Number.isFinite(data.conductScore) ? Math.min(100, Math.max(-100, data.conductScore)) : 0,
+      fuelEnabled: data.fuelEnabled !== false,
+      trunkWeapons: sanitizeIdList(data.trunkWeapons, 16),
+      tattoos: sanitizeIdList(data.tattoos, 10),
+      hairstyle: typeof data.hairstyle === 'string' ? sanitizeDisplayName(data.hairstyle, 24) : 'Default Cut',
     }
     const position = sanitizePosition(data.position)
     const inventory = sanitizeInventory(data.inventory, upgrade)
@@ -148,6 +173,9 @@ export async function loadCloudPlayerSave(uid: string): Promise<Partial<CitySave
     if (capturedTurfs) parsed.capturedTurfs = capturedTurfs
     return parsed
   } catch (error) {
+    if (isTransientFirestoreError(error) || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      return null
+    }
     handleFirestoreError(error, OperationType.GET, path)
   }
 }
@@ -179,6 +207,10 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
     protagonist: save.protagonist === 'lucia' ? 'lucia' : 'jason',
     partnerBond: Math.min(100, Math.max(0, Number.isFinite(save.partnerBond) ? save.partnerBond! : 32)),
     conductScore: Math.min(100, Math.max(-100, Number.isFinite(save.conductScore) ? save.conductScore! : 0)),
+    fuelEnabled: save.fuelEnabled !== false,
+    trunkWeapons: sanitizeIdList(save.trunkWeapons ?? ['carbine', 'pump_shotgun'], 16),
+    tattoos: sanitizeIdList(save.tattoos ?? [], 10),
+    hairstyle: sanitizeDisplayName(save.hairstyle ?? 'Default Cut', 24),
   }
   if (position) payload.position = position
   if (inventory) payload.inventory = inventory
@@ -199,6 +231,8 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
       const updatePayload: Record<string, unknown> = {
         displayName: payload.displayName,
         money: payload.money,
+        bankBalance: payload.bankBalance,
+        uncleanedLoot: payload.uncleanedLoot,
         health: payload.health,
         completed: payload.completed,
         upgrade: payload.upgrade,
@@ -206,6 +240,13 @@ export async function saveCloudPlayerSave(user: User, save: CitySave): Promise<v
         weather: payload.weather,
         robbedStores: payload.robbedStores,
         seenIntro: payload.seenIntro,
+        protagonist: payload.protagonist,
+        partnerBond: payload.partnerBond,
+        conductScore: payload.conductScore,
+        fuelEnabled: payload.fuelEnabled,
+        trunkWeapons: payload.trunkWeapons,
+        tattoos: payload.tattoos,
+        hairstyle: payload.hairstyle,
         updatedAt: serverTimestamp(),
       }
       if (position) updatePayload.position = position
@@ -255,16 +296,36 @@ export async function persistPlayerState(
   saveCityProgress(save)
 
   if (!user || !user.emailVerified || !VALID_ID.test(user.uid)) {
+    markPendingCloudSync()
     return { syncedToCloud: false }
   }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    markPendingCloudSync()
     return { syncedToCloud: false }
   }
   try {
     await saveCloudPlayerSave(user, save)
+    clearPendingCloudSync()
     return { syncedToCloud: true }
   } catch {
+    markPendingCloudSync()
     return { syncedToCloud: false }
+  }
+}
+
+export async function flushPendingCloudSync(
+  user: User | null,
+  save: CitySave,
+): Promise<{ flushed: boolean }> {
+  if (!hasPendingCloudSync()) return { flushed: false }
+  if (!user || !user.emailVerified || !VALID_ID.test(user.uid)) return { flushed: false }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return { flushed: false }
+  try {
+    await saveCloudPlayerSave(user, save)
+    clearPendingCloudSync()
+    return { flushed: true }
+  } catch {
+    return { flushed: false }
   }
 }
 

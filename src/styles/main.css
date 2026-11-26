@@ -234,7 +234,7 @@ kbd.x { background: #3f8cff; }
 .is-hidden { display: none !important; }
 
 /* ─── Modals (pause, settings, leaderboard, results) ───────────────────── */
-.screen-modal { display: grid; place-items: center; background: rgba(19, 17, 42, 0.55); backdrop-filter: blur(6px) saturate(0.8); -webkit-backdrop-filter: blur(6px) saturate(0.8); }
+.screen-modal { display: grid; place-items: center; background: rgba(19, 17, 42, 0.78); }
 .modal {
   position: relative;
   width: min(460px, calc(100vw - 32px));

@@ -1,4 +1,4 @@
-export type PhoneApp = 'home' | '911' | 'cab' | 'jacob' | 'camera' | 'sms' | 'settings'
+export type PhoneApp = 'home' | '911' | 'cab' | 'jacob' | 'social' | 'bank' | 'vehicle' | 'camera' | 'sms' | 'settings'
 export type PhoneRingtone = 'classic' | 'chime' | 'silent'
 
 export type SmsMessage = {
@@ -21,12 +21,21 @@ export type SmartphoneCallbacks = {
   onCycleWeather: () => void
   onCycleRingtone: () => PhoneRingtone
   onClose: () => void
+  onSocialEvent?: (eventId: string) => void
+  onDepositBank?: () => void
+  onWithdrawBank?: () => void
+  onRequestPersonalCar?: () => void
+  onSwitchProtagonist?: () => void
 }
 
 export type SmartphoneState = {
   open: boolean
   time: string
   money: number
+  bankBalance?: number
+  uncleanedLoot?: number
+  personalCarName?: string
+  protagonist?: string
   district: string
   grittyFilter: boolean
   ringtone: PhoneRingtone
@@ -35,6 +44,9 @@ export type SmartphoneState = {
   jacobActive: boolean
   latestPhoto: string | null
   photoCount: number
+  wanted?: number
+  heatStatus?: string
+  dispatchEta?: number
 }
 
 const DEFAULT_SMS: SmsMessage[] = [
@@ -79,6 +91,9 @@ export class SmartphoneHud {
     jacobActive: false,
     latestPhoto: null,
     photoCount: 0,
+    wanted: 0,
+    heatStatus: 'CLEAR — NO ACTIVE APB',
+    dispatchEta: 0,
   }
 
   constructor(parent: HTMLElement, private readonly callbacks: SmartphoneCallbacks) {
@@ -89,6 +104,10 @@ export class SmartphoneHud {
     parent.append(this.root)
     this.root.addEventListener('click', ev => this.onClick(ev))
     this.render()
+  }
+
+  getUnreadCount(): number {
+    return this.sms.filter(m => m.unread).length
   }
 
   addSms(from: string, body: string, time: string): void {
@@ -128,6 +147,18 @@ export class SmartphoneHud {
     }
   }
 
+  private formatScannerLine(state: SmartphoneState): string {
+    const wanted = Math.max(0, Math.floor(state.wanted ?? 0))
+    if (wanted <= 0) {
+      return `SCANNER · CLEAR (${state.district.toUpperCase()})`
+    }
+    const eta = state.dispatchEta ?? 0
+    if (eta > 0) {
+      return `SCANNER ★${wanted} · DISPATCH ${eta.toFixed(1)}s`
+    }
+    return `SCANNER ★${wanted} · ${(state.heatStatus ?? 'ACTIVE APB').slice(0, 22)}`
+  }
+
   update(dt: number, state: SmartphoneState): void {
     this.lastState = state
     this.root.hidden = !state.open
@@ -142,6 +173,22 @@ export class SmartphoneHud {
     if (clock) clock.textContent = state.time
     const moneyEl = this.root.querySelector<HTMLElement>('[data-phone-money]')
     if (moneyEl) moneyEl.textContent = `$${state.money.toLocaleString('en-US')}`
+    const scannerEl = this.root.querySelector<HTMLElement>('[data-phone-scanner]')
+    if (scannerEl) {
+      scannerEl.textContent = this.formatScannerLine(state)
+      scannerEl.classList.toggle('is-alert', (state.wanted ?? 0) > 0)
+    }
+    const bankEl = this.root.querySelector<HTMLElement>('[data-phone-bank]')
+    if (bankEl) bankEl.textContent = `BuckMe $${(state.bankBalance ?? 0).toLocaleString('en-US')}`
+    const bankBalEl = this.root.querySelector<HTMLElement>('[data-phone-bank-bal]')
+    if (bankBalEl) bankBalEl.textContent = `$${(state.bankBalance ?? 0).toLocaleString('en-US')} (Safe if Wasted)`
+    const lootEl = this.root.querySelector<HTMLElement>('[data-phone-loot]')
+    if (lootEl) lootEl.textContent = `$${(state.uncleanedLoot ?? 0).toLocaleString('en-US')} · Fence at Pawn/Jewelers (85%)`
+    const smsBadgeEl = this.root.querySelector<HTMLElement>('[data-phone-sms-badge]')
+    if (smsBadgeEl) {
+      const unread = this.getUnreadCount()
+      smsBadgeEl.textContent = `Inbox ${unread > 0 ? `(${unread})` : ''}`
+    }
     const filterEl = this.root.querySelector<HTMLElement>('[data-phone-filter]')
     if (filterEl) filterEl.textContent = state.grittyFilter ? 'GRITTY IV: ON' : 'GRITTY IV: OFF'
     const ringEl = this.root.querySelector<HTMLElement>('[data-phone-ring]')
@@ -190,6 +237,9 @@ export class SmartphoneHud {
       case 'app-911': this.setApp('911'); break
       case 'app-cab': this.setApp('cab'); break
       case 'app-jacob': this.setApp('jacob'); break
+      case 'app-social': this.setApp('social'); break
+      case 'app-bank': this.setApp('bank'); break
+      case 'app-vehicle': this.setApp('vehicle'); break
       case 'app-camera': this.setApp('camera'); break
       case 'app-sms': this.setApp('sms'); break
       case 'app-settings': this.setApp('settings'); break
@@ -199,13 +249,19 @@ export class SmartphoneHud {
       case 'dispatch-cab': this.callbacks.onCallCab(); break
       case 'ride-objective': this.callbacks.onRideCab('objective'); break
       case 'ride-safehouse': this.callbacks.onRideCab('safehouse'); break
-      case 'ride-respray': this.callbacks.onRideCab('respray'); break
       case 'skip-objective': this.callbacks.onSkipRide('objective'); break
-      case 'skip-safehouse': this.callbacks.onSkipRide('safehouse'); break
       case 'skip-respray': this.callbacks.onSkipRide('respray'); break
+      case 'skip-safehouse': this.callbacks.onSkipRide('safehouse'); break
       case 'jacob-van': this.callbacks.onCallJacob('van'); break
       case 'jacob-armor': this.callbacks.onCallJacob('armor'); break
       case 'jacob-ammo': this.callbacks.onCallJacob('ammo'); break
+      case 'social-race': this.callbacks.onSocialEvent?.('race'); break
+      case 'social-truck': this.callbacks.onSocialEvent?.('truck'); break
+      case 'social-cargo': this.callbacks.onSocialEvent?.('cargo'); break
+      case 'bank-deposit': this.callbacks.onDepositBank?.(); this.render(); break
+      case 'bank-withdraw': this.callbacks.onWithdrawBank?.(); this.render(); break
+      case 'deliver-car': this.callbacks.onRequestPersonalCar?.(); break
+      case 'switch-lead': this.callbacks.onSwitchProtagonist?.(); this.render(); break
       case 'snap-photo': this.callbacks.onTakePhoto(); break
       case 'toggle-filter': this.callbacks.onToggleFilter(); this.render(); break
       case 'cycle-weather': this.callbacks.onCycleWeather(); this.render(); break
@@ -214,19 +270,22 @@ export class SmartphoneHud {
   }
 
   private render(): void {
-    const unread = this.sms.filter(m => m.unread).length
+    const unread = this.getUnreadCount()
     const s = this.lastState
     let screenHtml = ''
 
     if (this.app === 'home') {
       screenHtml = `
         <div class="vbn-phone-menu">
+          <button type="button" data-phone-act="app-social"><b>FEED</b><span>Leonida Social Feed</span></button>
+          <button type="button" data-phone-act="app-bank"><b>BANK</b><span data-phone-bank>BuckMe $${(s.bankBalance ?? 0).toLocaleString('en-US')}</span></button>
+          <button type="button" data-phone-act="app-vehicle"><b>RIDE</b><span>Personal Car Delivery</span></button>
           <button type="button" data-phone-act="app-911"><b>911</b><span>Emergency Dispatch</span></button>
           <button type="button" data-phone-act="app-cab"><b>CAB</b><span>Roman Express Service</span></button>
           <button type="button" data-phone-act="app-jacob"><b>JACOB</b><span>Arms &amp; Kevlar Van</span></button>
-          <button type="button" data-phone-act="app-camera"><b>CAM</b><span>Snapmatic Capture (${s.photoCount})</span></button>
-          <button type="button" data-phone-act="app-sms"><b>SMS</b><span>Messages ${unread > 0 ? `(${unread} NEW)` : ''}</span></button>
-          <button type="button" data-phone-act="app-settings"><b>CFG</b><span>Audio &amp; LC Filter</span></button>
+          <button type="button" data-phone-act="app-camera"><b>CAM</b><span>Snapmatic (${s.photoCount})</span></button>
+          <button type="button" data-phone-act="app-sms"><b>SMS</b><span data-phone-sms-badge>Inbox ${unread > 0 ? `(${unread})` : ''}</span></button>
+          <button type="button" data-phone-act="app-settings"><b>CFG</b><span>Sky, Audio &amp; Lead</span></button>
         </div>`
     } else if (this.app === '911') {
       screenHtml = `
@@ -277,6 +336,34 @@ export class SmartphoneHud {
           </div>
           <button type="button" class="is-back" data-phone-act="home">← BACK</button>
         </div>`
+    } else if (this.app === 'social') {
+      screenHtml = `
+        <div class="vbn-phone-sub">
+          <p class="vbn-phone-title">LEONIDA SOCIAL FEED</p>
+          <button type="button" data-phone-act="social-race">@vice_nights: Midnight Beach Sprint LIVE → WAYPOINT</button>
+          <button type="button" data-phone-act="social-truck">@bleeter_lb: Fleeca Armored Cash Van near Downtown → WAYPOINT</button>
+          <button type="button" data-phone-act="social-cargo">@port_watch: Unmarked Cargo Drop at Port Quay → WAYPOINT</button>
+          <button type="button" class="is-back" data-phone-act="home">← BACK</button>
+        </div>`
+    } else if (this.app === 'bank') {
+      screenHtml = `
+        <div class="vbn-phone-sub">
+          <p class="vbn-phone-title">BUCKME MOBILE BANKING</p>
+          <div class="vbn-phone-sms"><strong>PROTECTED BANK</strong><p data-phone-bank-bal>$${(s.bankBalance ?? 0).toLocaleString('en-US')} (Safe if Wasted)</p></div>
+          <div class="vbn-phone-sms"><strong>UNCLEANED LOOT DUFFEL</strong><p data-phone-loot>$${(s.uncleanedLoot ?? 0).toLocaleString('en-US')} · Fence at Pawn/Jewelers (85%)</p></div>
+          <button type="button" data-phone-act="bank-deposit">DEPOSIT ALL CASH ($${s.money.toLocaleString('en-US')})</button>
+          <button type="button" data-phone-act="bank-withdraw">WITHDRAW $500 CASH</button>
+          <button type="button" class="is-back" data-phone-act="home">← BACK</button>
+        </div>`
+    } else if (this.app === 'vehicle') {
+      screenHtml = `
+        <div class="vbn-phone-sub">
+          <p class="vbn-phone-title">PERSONAL RIDE MECHANIC</p>
+          <div class="vbn-phone-sms"><strong>REGISTERED VEHICLE</strong><p>${(s.personalCarName ?? 'Roman Liberty Cab').toUpperCase()}</p></div>
+          <button type="button" data-phone-act="deliver-car">DELIVER PERSONAL CAR TO CURB</button>
+          <button type="button" data-phone-act="switch-lead">SWITCH LEAD (${(s.protagonist ?? 'jason').toUpperCase()})</button>
+          <button type="button" class="is-back" data-phone-act="home">← BACK</button>
+        </div>`
     } else {
       screenHtml = `
         <div class="vbn-phone-sub">
@@ -284,6 +371,7 @@ export class SmartphoneHud {
           <button type="button" data-phone-act="toggle-filter" data-phone-filter>${s.grittyFilter ? 'GRITTY IV: ON' : 'GRITTY IV: OFF'}</button>
           <button type="button" data-phone-act="cycle-ringtone" data-phone-ring>TONE: ${s.ringtone.toUpperCase()}</button>
           <button type="button" data-phone-act="cycle-weather" data-phone-weather>SKY: ${s.weather.toUpperCase()}</button>
+          <button type="button" data-phone-act="switch-lead">SWITCH LEAD (${(s.protagonist ?? 'jason').toUpperCase()})</button>
           <button type="button" class="is-back" data-phone-act="home">← BACK</button>
         </div>`
     }
@@ -293,6 +381,7 @@ export class SmartphoneHud {
         <div class="vbn-phone-earpiece"><span></span><small>BADGER IV</small><button type="button" data-phone-act="close" aria-label="Put away phone">✕</button></div>
         <div class="vbn-phone-lcd">
           <div class="vbn-phone-status"><span>▂▄▆ WHIZ</span><span data-phone-clock>${s.time}</span><span data-phone-money>$${s.money.toLocaleString('en-US')}</span></div>
+          <div class="vbn-phone-scanner ${(s.wanted ?? 0) > 0 ? 'is-alert' : ''}" data-phone-scanner>${this.formatScannerLine(s)}</div>
           ${screenHtml}
         </div>
         <div class="vbn-phone-keys">

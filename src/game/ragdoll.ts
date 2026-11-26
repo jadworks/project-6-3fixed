@@ -107,6 +107,25 @@ export function applyRagdollImpulse(
   return { knockedOffFeet, droppedWeapon: shouldDrop }
 }
 
+/** Trigger stumble or knockdown when landing hard from a fall. */
+export function applyFallImpactRagdoll(
+  rig: RagdollRig,
+  actorPos: THREE.Vector3,
+  verticalSpeed: number,
+): boolean {
+  if (verticalSpeed > -5.2) return false
+  const origin = new THREE.Vector3(actorPos.x, actorPos.y, actorPos.z - 0.6)
+  if (verticalSpeed < -7.5) {
+    applyRagdollImpulse(rig, actorPos, origin, Math.min(14, Math.abs(verticalSpeed) * 0.9), 'leg', false, true)
+    return true
+  }
+  rig.state = 'stumble'
+  rig.stateTimer = 0.75
+  rig.woundZone = 'leg'
+  rig.velocity.y = 0
+  return true
+}
+
 /** Check whether a stumbling NPC trips over raised Vice Bay curbs around x = +-10.1m. */
 export function checkCurbTrip(rig: RagdollRig, pos: THREE.Vector3): boolean {
   if (rig.state !== 'stumble' || rig.curbTripCooldown > 0) return false
@@ -212,12 +231,20 @@ export function stepRagdoll(
     nodes.model.rotation.x = damp(nodes.model.rotation.x, 0, 8, dt)
     nodes.model.rotation.z = damp(nodes.model.rotation.z, 0, 8, dt)
     nodes.model.position.y = damp(nodes.model.position.y, 0, 8, dt)
-    nodes.leftArm.rotation.z = damp(nodes.leftArm.rotation.z, 0, 8, dt)
-    nodes.rightArm.rotation.z = damp(nodes.rightArm.rotation.z, 0, 8, dt)
+    nodes.leftArm.rotation.x = damp(nodes.leftArm.rotation.x, 0, 9, dt)
+    nodes.rightArm.rotation.x = damp(nodes.rightArm.rotation.x, 0, 9, dt)
+    nodes.leftArm.rotation.z = damp(nodes.leftArm.rotation.z, 0, 9, dt)
+    nodes.rightArm.rotation.z = damp(nodes.rightArm.rotation.z, 0, 9, dt)
+    nodes.leftLeg.rotation.x = damp(nodes.leftLeg.rotation.x, 0, 9, dt)
+    nodes.rightLeg.rotation.x = damp(nodes.rightLeg.rotation.x, 0, 9, dt)
     if (rig.stateTimer <= 0) {
       rig.state = 'upright'
       nodes.model.rotation.set(0, 0, 0)
       nodes.model.position.y = 0
+      nodes.leftArm.rotation.set(0, 0, 0)
+      nodes.rightArm.rotation.set(0, 0, 0)
+      nodes.leftLeg.rotation.set(0, 0, 0)
+      nodes.rightLeg.rotation.set(0, 0, 0)
     }
   }
 

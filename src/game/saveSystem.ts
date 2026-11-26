@@ -208,6 +208,20 @@ export function loadCitySave(): CitySave {
   } catch { return defaults() }
 }
 
+const PENDING_SYNC_KEY = 'vicebay-nights.pending-cloud-sync.v1'
+
 export function saveCityProgress(save: CitySave): void {
   try { localStorage.setItem(KEY, JSON.stringify(save)) } catch { /* Play remains available when storage is unavailable. */ }
+}
+
+export function markPendingCloudSync(): void {
+  try { localStorage.setItem(PENDING_SYNC_KEY, String(Date.now())) } catch { /* Storage optional */ }
+}
+
+export function clearPendingCloudSync(): void {
+  try { localStorage.removeItem(PENDING_SYNC_KEY) } catch { /* Storage optional */ }
+}
+
+export function hasPendingCloudSync(): boolean {
+  try { return localStorage.getItem(PENDING_SYNC_KEY) !== null } catch { return false }
 }

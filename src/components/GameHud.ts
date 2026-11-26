@@ -8,8 +8,26 @@ import { CombatHud, type CombatHudCallbacks, type CombatHudState } from './Comba
 import { SmartphoneHud, type SmartphoneCallbacks, type SmartphoneState } from './SmartphoneHud'
 import type { ApbHudIntel } from '../game/policeKnowledge'
 
+export type HudDrawerAction = {
+  id: string
+  label: string
+  detail?: string
+  badge?: string
+  disabled?: boolean
+}
+
+export type HudDrawerState = {
+  kind: 'store' | 'trunk' | 'dialogue'
+  title: string
+  subtitle: string
+  hint: string
+  actions: HudDrawerAction[]
+}
+
 export type HudState = {
   money: number
+  bankBalance?: number
+  uncleanedLoot?: number
   health: number
   ammo: number
   wanted: number
@@ -32,12 +50,31 @@ export type HudState = {
   weaponName?: string
   weaponAmmoText?: string
   stamina?: number
+  focusGauge?: number
+  focusActive?: boolean
+  protagonist?: 'jason' | 'lucia'
+  partnerActive?: boolean
+  partnerBond?: number
+  conductTier?: string
   homies?: number
   maxHomies?: number
   turfWar?: { zoneName: string; wave: number; totalWaves: number; remaining: number } | null
   gangZones?: GangMapZone[]
   homieBlips?: { x: number; z: number; recruited: boolean }[]
   rivalBlips?: { x: number; z: number; color: string }[]
+  hotZones?: { x: number; z: number; radius: number; label: string }[]
+  activeHotZoneLabel?: string | null
+  stores?: { id: string; name: string; category: string; x: number; z: number; robbed: boolean; status?: string; cooldownSec?: number }[]
+  activeStoreCategory?: string
+  holdup?: {
+    storeName: string
+    intimidation: number
+    registerPct: number
+    safePct: number
+    cctvOn: boolean
+    guardAlert: boolean
+  } | null
+  drawer?: HudDrawerState | null
   armor?: number
   apb?: ApbHudIntel | null
   apbTickerExpanded?: boolean
@@ -49,6 +86,13 @@ export type HudState = {
     plateNumber: string
     windshieldCracked: boolean
     damagedTire: boolean
+    securityTier?: 1 | 2 | 3
+    fuel?: number
+    isElectric?: boolean
+    trackerActive?: boolean
+    isPersonal?: boolean
+    alarmActive?: boolean
+    hotwiringProgress?: number
   } | null
 }
 
@@ -67,6 +111,10 @@ export type HudCallbacks = {
   auth?: () => void
   togglePhone?: () => void
   toggleTouch?: () => void
+  onDrawerAction?: (actionId: string) => void
+  onCloseDrawer?: () => void
+  onSelectMapFilter?: (category: string) => void
+  switchProtagonist?: () => void
   combat?: CombatHudCallbacks
   phone?: SmartphoneCallbacks
 }
@@ -104,6 +152,8 @@ const mapArt = (): string => `
   <span class="vbn-map-marker vbn-marker-port" title="Port Vice"><i></i></span>
   <span class="vbn-map-marker vbn-marker-wetlands" title="The Wetlands"><i></i></span>
   <span class="vbn-map-lkp" title="Police search zone" hidden></span>
+  <span class="vbn-map-hotzones"></span>
+  <span class="vbn-map-stores"></span>
   <span class="vbn-map-homies"></span>
   <span class="vbn-map-rivals"></span>
   <span class="vbn-map-witnesses"></span>
@@ -123,10 +173,9 @@ const controls = [
   ['Q / RMB', 'Snap to cover / aim peek'],
   ['CLICK', 'Fire / blind-fire / brawl'],
   ['SPACE (UNARMED)', 'Dodge sway in brawl'],
-  ['TAB / B / R', 'Weapon wheel / mod / reload'],
-  ['P / ↑ / V / X', 'Phone / mask / holster'],
-  ['ALT', 'Expand police APB ticker'],
-  ['J / G / M / T', 'RPG stats / crew / map / sky'],
+  ['J / G / K / N', 'Stats / partner / switch lead / NPC talk'],
+  ['TAB / B / R / U', 'Wheel / mod / reload / focus slow-mo'],
+  ['M / T / P / V', 'Map / sky / phone / mask'],
   ['PAD: L-STICK / RT / LT', 'Move, drive, accelerate & aim'],
   ['PAD: A / B / X / Y', 'Jump, crouch, reload & car/use'],
   ['PAD: RB / LB+D-PAD', 'Weapon wheel & phone/stats/mask'],
@@ -228,14 +277,18 @@ export class GameHud {
     this.combat.update(dt, state, this.view === 'game')
   }
 
-  triggerHitmarker(kind: 'normal' | 'critical' | 'armor' = 'normal'): void {
+  triggerHitmarker(kind: 'normal' | 'critical' | 'armor' | 'nonlethal' = 'normal'): void {
     this.combat.triggerHitmarker(kind)
   }
 
-  showTitle(): void { this.setView('title') }
-  showGame(): void { this.setView('game') }
-  showPause(): void { this.setView('pause') }
-  showCutscene(): void { this.setView('cutscene') }
+  setBodyState(state: 'title' | 'playing' | 'paused' | 'cutscene'): void {
+    document.body.dataset.state = state
+  }
+
+  showTitle(): void { this.setBodyState('title'); this.setView('title') }
+  showGame(): void { this.setBodyState('playing'); this.setView('game') }
+  showPause(): void { this.setBodyState('paused'); this.setView('pause') }
+  showCutscene(): void { this.setBodyState('cutscene'); this.setView('cutscene') }
   setAuthStatus(name: string | null): void {
     const signedIn = Boolean(name)
     this.text('auth-title', signedIn ? `CLOUD SYNC: ${name} · SIGN OUT` : 'SIGN IN WITH GOOGLE (CLOUD SAVE)')
@@ -313,10 +366,17 @@ export class GameHud {
   update(state: HudState): void {
     const number = (value: number, fallback = 0): number => Number.isFinite(value) ? value : fallback
     const health = Math.max(0, Math.min(100, number(state.health)))
+    const armor = Math.max(0, Math.min(100, number(state.armor ?? 0)))
     const stamina = Math.max(0, Math.min(100, number(state.stamina ?? 100)))
     const wanted = Math.max(0, Math.min(6, Math.floor(number(state.wanted))))
     this.text('money', `$${Math.max(0, Math.floor(number(state.money))).toLocaleString('en-US')}`)
+    this.text('bank', `$${Math.max(0, Math.floor(number(state.bankBalance ?? 0))).toLocaleString('en-US')}`)
+    this.text('loot', `$${Math.max(0, Math.floor(number(state.uncleanedLoot ?? 0))).toLocaleString('en-US')}`)
+    const lootBox = this.element.querySelector<HTMLElement>('[data-loot-box]')
+    if (lootBox) lootBox.hidden = Math.floor(number(state.uncleanedLoot ?? 0)) <= 0
+
     this.text('health', `${Math.round(health)}`)
+    this.text('armor', `${Math.round(armor)}`)
     this.text('weapon', state.weaponName || 'WEAPON / AMMO')
     this.text('ammo', state.weaponAmmoText || `${Math.max(0, Math.floor(number(state.ammo)))}`)
     this.text('district', state.district || 'VICE BAY')
@@ -327,7 +387,26 @@ export class GameHud {
     this.text('speed', `${Math.round(Math.abs(number(state.speed)))}`)
     this.text('prompt', state.prompt || '')
     this.element.querySelectorAll<HTMLElement>('[data-health-fill]').forEach(el => { el.style.width = `${health}%` })
+    this.element.querySelectorAll<HTMLElement>('[data-armor-fill]').forEach(el => { el.style.width = `${armor}%` })
     this.element.querySelectorAll<HTMLElement>('[data-stamina-fill]').forEach(el => { el.style.width = `${stamina}%` })
+    const focusPct = Math.max(0, Math.min(100, number(state.focusGauge ?? 100)))
+    this.element.querySelectorAll<HTMLElement>('[data-focus-fill]').forEach(el => {
+      el.style.width = `${focusPct}%`
+      el.classList.toggle('is-active', Boolean(state.focusActive))
+    })
+    const unreadSms = this.phone.getUnreadCount()
+    const phoneBadge = this.element.querySelector<HTMLElement>('[data-phone-badge]')
+    if (phoneBadge) {
+      phoneBadge.hidden = unreadSms <= 0
+      if (unreadSms > 0) phoneBadge.textContent = String(unreadSms)
+    }
+
+    const leadEl = this.element.querySelector<HTMLElement>('[data-lead-badge]')
+    if (leadEl) {
+      const lead = (state.protagonist ?? 'jason').toUpperCase()
+      const partnerMark = state.partnerActive ? ' + PARTNER' : ''
+      leadEl.textContent = `${lead}${partnerMark}`
+    }
 
     const squadEl = this.element.querySelector<HTMLElement>('[data-squad-badge]')
     if (squadEl) {
@@ -346,9 +425,54 @@ export class GameHud {
       }
     }
 
+    const holdupEl = this.element.querySelector<HTMLElement>('[data-holdup-banner]')
+    if (holdupEl) {
+      const hu = state.holdup
+      holdupEl.hidden = !hu
+      if (hu) {
+        this.text('holdup-store', `HOLDUP · ${hu.storeName.toUpperCase()}`)
+        this.text('holdup-meta', `CCTV: ${hu.cctvOn ? 'ACTIVE' : 'SHOT'} · ${hu.guardAlert ? 'GUARD ALERT!' : 'CONTAINED'}`)
+        const intFill = holdupEl.querySelector<HTMLElement>('[data-holdup-intim]')
+        const regFill = holdupEl.querySelector<HTMLElement>('[data-holdup-reg]')
+        const safeFill = holdupEl.querySelector<HTMLElement>('[data-holdup-safe]')
+        if (intFill) intFill.style.width = `${Math.round(hu.intimidation)}%`
+        if (regFill) regFill.style.width = `${Math.round(hu.registerPct * 100)}%`
+        if (safeFill) safeFill.style.width = `${Math.round(hu.safePct * 100)}%`
+      }
+    }
+
+    const drawerEl = this.element.querySelector<HTMLElement>('[data-hud-drawer]')
+    if (drawerEl) {
+      const dr = state.drawer
+      drawerEl.hidden = !dr
+      if (dr) {
+        const keySig = `${dr.kind}:${dr.title}:${dr.actions.map(a => `${a.id}:${a.disabled ? 1 : 0}:${a.badge ?? ''}`).join('|')}`
+        if (drawerEl.dataset.sig !== keySig) {
+          drawerEl.dataset.sig = keySig
+          drawerEl.innerHTML = `
+            <div class="vbn-drawer-head">
+              <div><small>${dr.subtitle}</small><strong>${dr.title}</strong></div>
+              <button type="button" class="vbn-wheel-close" data-drawer-close>✕</button>
+            </div>
+            <div class="vbn-drawer-list">
+              ${dr.actions.map((a, idx) => `
+                <button type="button" class="vbn-drawer-btn" data-drawer-act="${a.id}" ${a.disabled ? 'disabled' : ''}>
+                  <span><b>${idx + 1}. ${a.label}</b>${a.detail ? `<small>${a.detail}</small>` : ''}</span>
+                  ${a.badge ? `<em>${a.badge}</em>` : ''}
+                </button>
+              `).join('')}
+            </div>
+            <p class="vbn-drawer-hint">${dr.hint}</p>
+          `
+        }
+      } else {
+        drawerEl.dataset.sig = ''
+      }
+    }
+
     const heat = state.heat
     this.wantedHud.setTickerExpanded(Boolean(state.apbTickerExpanded))
-    this.wantedHud.update(wanted, heat, state.apb ?? undefined)
+    this.wantedHud.update(wanted, heat, state.apb ?? undefined, state.activeHotZoneLabel)
 
     const gamePanel = this.element.querySelector<HTMLElement>('[data-view-panel="game"]')
     if (gamePanel) {
@@ -356,7 +480,7 @@ export class GameHud {
     }
     const wipers = this.element.querySelector<HTMLElement>('[data-wipers]')
     if (wipers) {
-      wipers.hidden = !(state.inVehicle && state.weather === 'rain')
+      wipers.hidden = !(state.inVehicle && (state.weather === 'rain' || state.weather === 'storm'))
     }
     const vehMeta = this.element.querySelector<HTMLElement>('[data-vehicle-meta]')
     if (vehMeta) {
@@ -364,8 +488,15 @@ export class GameHud {
       vehMeta.hidden = !vt
       if (vt) {
         const items: string[] = []
-        items.push(`<span class="${vt.seatbeltLatched ? '' : 'is-warn'}">${vt.seatbeltLatched ? 'BELT LATCHED' : 'NO SEATBELT'} · ${vt.plateNumber}</span>`)
-        if (vt.engineStalled) {
+        const tierLabel = `T${vt.securityTier ?? 1}`
+        const fuelLabel = vt.fuel !== undefined ? `${vt.isElectric ? 'EV' : 'FUEL'} ${Math.round(vt.fuel)}%` : ''
+        items.push(`<span class="${vt.seatbeltLatched ? '' : 'is-warn'}">${vt.isPersonal ? 'PERSONAL · ' : ''}${tierLabel} · ${vt.plateNumber}</span>`)
+        if (fuelLabel) items.push(`<span class="${(vt.fuel ?? 100) < 18 ? 'is-warn' : ''}">${fuelLabel}</span>`)
+        if ((vt.hotwiringProgress ?? 1) < 1) {
+          items.push(`<span class="is-warn">HOTWIRING ${Math.round((vt.hotwiringProgress ?? 0) * 100)}%</span>`)
+        } else if (vt.trackerActive) {
+          items.push(`<span class="is-warn">POLICE GPS TRACKER ACTIVE</span>`)
+        } else if (vt.engineStalled) {
           items.push(`<span class="is-warn">${vt.crankProgress > 0 ? `CRANKING ${Math.round(vt.crankProgress * 100)}%` : 'ENGINE STALLED — HOLD W'}</span>`)
         } else if (vt.damagedTire) {
           items.push(`<span class="is-warn">PUNCTURED TIRE / BENT AXLE</span>`)
@@ -386,8 +517,12 @@ export class GameHud {
     }
 
     const nearPursuer = wanted > 0 && Number.isFinite(state.nearestPursuerDist) && (state.nearestPursuerDist ?? Infinity) <= 60
+    const isSearching = Boolean(heat && heat.wanted > 0 && !heat.inSight)
+    const isPursuit = Boolean(heat && heat.wanted > 0 && heat.inSight)
     this.element.querySelectorAll<HTMLElement>('.vbn-minimap-frame').forEach(el => {
       el.classList.toggle('is-siren-near', nearPursuer)
+      el.classList.toggle('is-searching', isSearching)
+      el.classList.toggle('is-pursuit', isPursuit)
       el.classList.toggle('is-lockdown', wanted >= 6)
     })
 
@@ -516,6 +651,43 @@ export class GameHud {
       })
     })
 
+    const hotZones = state.hotZones ?? []
+    this.element.querySelectorAll<HTMLElement>('.vbn-map-hotzones').forEach(container => {
+      while (container.children.length < hotZones.length) {
+        const z = document.createElement('i')
+        z.className = 'vbn-map-hotzone'
+        container.append(z)
+      }
+      while (container.children.length > hotZones.length) container.lastElementChild?.remove()
+      hotZones.forEach((hz, idx) => {
+        const el = container.children[idx] as HTMLElement
+        el.title = `HOT ZONE: ${hz.label}`
+        place(el, hz)
+      })
+    })
+
+    const filterCat = state.activeStoreCategory ?? 'all'
+    const storeList = (state.stores ?? []).filter(s => filterCat === 'all' || s.category === filterCat)
+    this.element.querySelectorAll<HTMLElement>('.vbn-map-stores').forEach(container => {
+      while (container.children.length < storeList.length) {
+        const s = document.createElement('i')
+        s.className = 'vbn-map-store'
+        container.append(s)
+      }
+      while (container.children.length > storeList.length) container.lastElementChild?.remove()
+      storeList.forEach((st, idx) => {
+        const el = container.children[idx] as HTMLElement
+        const statusTag = st.cooldownSec && st.cooldownSec > 0 ? ` · LOCKED ${st.cooldownSec}s` : st.status === 'holdup_active' ? ' · HOLDUP' : st.status === 'alarm_locked' ? ' · ALARM' : ''
+        el.title = `${st.name}${statusTag}`
+        el.dataset.cat = st.category
+        el.classList.toggle('is-robbed', st.robbed || (st.cooldownSec ?? 0) > 0)
+        place(el, st)
+      })
+    })
+    this.element.querySelectorAll<HTMLElement>('[data-map-filter]').forEach(btn => {
+      btn.classList.toggle('is-active', btn.dataset.mapFilter === filterCat)
+    })
+
     this.element.querySelectorAll<HTMLElement>('.vbn-map-homes').forEach(container => {
       while (container.children.length < state.safehouses.length) {
         const marker = document.createElement('i')
@@ -587,7 +759,22 @@ export class GameHud {
   }
 
   private onClick(event: MouseEvent): void {
-    const button = (event.target as Element).closest<HTMLButtonElement>('button[data-action]')
+    const el = event.target as Element
+    const drawerBtn = el.closest<HTMLButtonElement>('[data-drawer-act]')
+    if (drawerBtn?.dataset.drawerAct) {
+      this.callbacks.onDrawerAction?.(drawerBtn.dataset.drawerAct)
+      return
+    }
+    if (el.closest('[data-drawer-close]')) {
+      this.callbacks.onCloseDrawer?.()
+      return
+    }
+    const filterBtn = el.closest<HTMLButtonElement>('[data-map-filter]')
+    if (filterBtn?.dataset.mapFilter) {
+      this.callbacks.onSelectMapFilter?.(filterBtn.dataset.mapFilter)
+      return
+    }
+    const button = el.closest<HTMLButtonElement>('button[data-action]')
     if (!button || !this.element.contains(button)) return
     switch (button.dataset.action) {
       case 'start': this.callbacks.start(); break
@@ -610,6 +797,7 @@ export class GameHud {
       case 'auth': this.callbacks.auth?.(); break
       case 'phone-toggle': this.callbacks.togglePhone?.(); break
       case 'touch-toggle': this.callbacks.toggleTouch?.(); break
+      case 'switch-lead': this.callbacks.switchProtagonist?.(); break
       case 'quit': this.callbacks.quit(); this.showTitle(); break
       case 'mission': {
         const id = button.dataset.mission
@@ -671,22 +859,34 @@ export class GameHud {
           <strong data-value="turf-title">TURF WAR</strong>
           <span data-value="turf-wave">WAVE 1/3</span>
         </div>
+        <div class="vbn-holdup-banner" data-holdup-banner hidden>
+          <div class="vbn-holdup-top"><strong data-value="holdup-store">HOLDUP</strong><span data-value="holdup-meta">CCTV: ACTIVE</span></div>
+          <div class="vbn-holdup-bars">
+            <label>INTIMIDATION<i><b data-holdup-intim></b></i></label>
+            <label>REGISTER<i><b data-holdup-reg></b></i></label>
+            <label>SAFE<i><b data-holdup-safe></b></i></label>
+          </div>
+        </div>
+        <aside class="vbn-drawer" data-hud-drawer hidden></aside>
         <div class="vbn-game-top-left">
-          <div class="vbn-hud-kicker"><span class="vbn-live-dot"></span> VICE BAY <b>/</b> <span data-value="district">VICE BAY</span></div>
+          <div class="vbn-hud-kicker"><span class="vbn-live-dot"></span> VICE BAY <b>/</b> <span data-value="district">VICE BAY</span> <b>·</b> <button type="button" class="vbn-lead-chip" data-action="switch-lead" data-lead-badge>JASON</button></div>
           <div class="vbn-objective"><span class="vbn-objective-icon">${icons.target}</span><div><small>CURRENT OBJECTIVE</small><strong data-value="objective">Explore Vice Bay</strong></div></div>
           <div class="vbn-world-meta"><span data-value="time">--:--</span><i></i><span data-value="weather">CLEAR</span><i></i><span data-value="mode">ON FOOT</span><i></i><span class="vbn-squad-pill" data-squad-badge>HOMIES 0/1</span></div>
         </div>
         <div class="vbn-game-top-right">
-          <div class="vbn-money"><small>CASH ON HAND</small><strong data-value="money">$0</strong></div>
+          <div class="vbn-economy-stack">
+            <div class="vbn-money"><small>CASH ON HAND</small><strong data-value="money">$0</strong></div>
+            <div class="vbn-bank-row"><span>BANK <b data-value="bank">$0</b></span><span class="vbn-loot-chip" data-loot-box hidden>LOOT <b data-value="loot">$0</b></span></div>
+          </div>
           <div data-wanted-mount></div>
-          <div class="vbn-vitals"><span class="vbn-vital-icon">${icons.heart}</span><div class="vbn-health"><div><small>HEALTH</small><b data-value="health">100</b></div><span class="vbn-health-track"><i data-health-fill></i></span><span class="vbn-stamina-track"><i data-stamina-fill></i></span></div><div class="vbn-ammo"><small data-value="weapon">WEAPON / AMMO</small><strong data-value="ammo">0</strong></div></div>
+          <div class="vbn-vitals"><span class="vbn-vital-icon">${icons.heart}</span><div class="vbn-health"><div><small>HEALTH</small><b data-value="health">100</b></div><span class="vbn-health-track"><i data-health-fill></i></span><div class="vbn-armor-row"><small>ARMOR</small><b data-value="armor">0</b></div><span class="vbn-armor-track"><i data-armor-fill></i></span><span class="vbn-stamina-track"><i data-stamina-fill></i></span><span class="vbn-focus-track"><i data-focus-fill></i></span></div><div class="vbn-ammo"><small data-value="weapon">WEAPON / AMMO</small><strong data-value="ammo">0</strong></div></div>
         </div>
         <div class="vbn-game-bottom-left">
-          <div class="vbn-minimap-frame"><div class="vbn-minimap">${mapArt()}</div><span class="vbn-map-corner">N</span></div>
+          <div class="vbn-minimap-frame"><div class="vbn-minimap">${mapArt()}</div></div>
           <div class="vbn-map-caption"><div><small>CURRENT DISTRICT</small><strong data-value="district">VICE BAY</strong></div><button class="vbn-icon-btn" type="button" data-action="map" aria-label="Open city map">${icons.map}</button></div>
         </div>
         <div class="vbn-prompt" data-prompt-wrap hidden><span class="vbn-prompt-accent"></span><span data-value="prompt"></span></div>
-        <div class="vbn-game-bottom-right"><div class="vbn-vehicle-meta" data-vehicle-meta hidden></div><div class="vbn-speed" data-vehicle-only hidden><strong data-value="speed">0</strong><span>SPEED</span></div><button class="vbn-hud-phone-btn" type="button" data-action="phone-toggle"><span>📱 PHONE <kbd>P</kbd></span></button><button class="vbn-hud-pause" type="button" data-action="pause">${icons.pause}<span>PAUSE <kbd>ESC</kbd></span></button></div>
+        <div class="vbn-game-bottom-right"><div class="vbn-vehicle-meta" data-vehicle-meta hidden></div><div class="vbn-speed" data-vehicle-only hidden><strong data-value="speed">0</strong><span>SPEED</span></div><button class="vbn-hud-phone-btn" type="button" data-action="phone-toggle"><span>📱 PHONE <kbd>P</kbd><b class="vbn-phone-badge" data-phone-badge hidden>0</b></span></button><button class="vbn-hud-pause" type="button" data-action="pause">${icons.pause}<span>PAUSE <kbd>ESC</kbd></span></button></div>
       </section>
 
       <section class="vbn-overlay" data-view-panel="pause" aria-label="Pause menu" hidden>
@@ -706,7 +906,7 @@ export class GameHud {
       </section>
 
       <section class="vbn-overlay vbn-map-overlay" data-view-panel="map" aria-label="City map" hidden>
-        <div class="vbn-modal vbn-map-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> CITY DIRECTORY</span><button class="vbn-close" data-action="back" type="button" aria-label="Close map">${icons.close}</button></div><div class="vbn-map-heading"><div><p class="vbn-section-label">FIND YOUR WAY</p><h2>VICE BAY <span>MAP.</span></h2></div><div class="vbn-map-heading-meta"><small>YOU ARE IN</small><strong data-value="district">VICE BAY</strong></div></div><div class="vbn-map-layout"><div class="vbn-full-map">${mapArt()}<span class="vbn-map-label vbn-map-label-beach">VICE BEACH</span><span class="vbn-map-label vbn-map-label-downtown">DOWNTOWN</span><span class="vbn-map-label vbn-map-label-port">PORT VICE</span><span class="vbn-map-label vbn-map-label-wetlands">THE WETLANDS</span></div><div class="vbn-map-legend"><p class="vbn-section-label">THE DISTRICTS</p><div><i class="vbn-dot pink"></i><span>01 <strong>VICE BEACH</strong><small>Beachfront / nightlife</small></span></div><div><i class="vbn-dot cyan"></i><span>02 <strong>DOWNTOWN</strong><small>City center / bank</small></span></div><div><i class="vbn-dot yellow"></i><span>03 <strong>PORT VICE</strong><small>Waterfront / warehouses</small></span></div><div><i class="vbn-dot green"></i><span>04 <strong>THE WETLANDS</strong><small>Outskirts / open roads</small></span></div><p class="vbn-legend-you"><i></i> YOUR POSITION</p></div></div><button class="vbn-back" type="button" data-action="back">← &nbsp; BACK</button></div>
+        <div class="vbn-modal vbn-map-modal"><div class="vbn-modal-top"><span>VICE BAY NIGHTS <b>/</b> CITY DIRECTORY · 20 ENTERABLE STORES</span><button class="vbn-close" data-action="back" type="button" aria-label="Close map">${icons.close}</button></div><div class="vbn-map-heading"><div><p class="vbn-section-label">FIND YOUR WAY</p><h2>VICE BAY <span>MAP.</span></h2></div><div class="vbn-map-heading-meta"><small>YOU ARE IN</small><strong data-value="district">VICE BAY</strong></div></div><div class="vbn-map-filters"><button type="button" data-map-filter="all">ALL (20)</button><button type="button" data-map-filter="weapons">WEAPONS</button><button type="button" data-map-filter="food">DINING</button><button type="button" data-map-filter="fashion">FASHION</button><button type="button" data-map-filter="auto">AUTO &amp; CHOP</button><button type="button" data-map-filter="finance">BANK &amp; FENCE</button><button type="button" data-map-filter="lifestyle">GYM/INK</button><button type="button" data-map-filter="market">24/7 MART</button><button type="button" data-map-filter="medical">CLINIC</button></div><div class="vbn-map-layout"><div class="vbn-full-map">${mapArt()}<span class="vbn-map-label vbn-map-label-beach">VICE BEACH</span><span class="vbn-map-label vbn-map-label-downtown">DOWNTOWN</span><span class="vbn-map-label vbn-map-label-port">PORT VICE</span><span class="vbn-map-label vbn-map-label-wetlands">THE WETLANDS</span></div><div class="vbn-map-legend"><p class="vbn-section-label">THE DISTRICTS</p><div><i class="vbn-dot pink"></i><span>01 <strong>VICE BEACH</strong><small>Beachfront / nightlife</small></span></div><div><i class="vbn-dot cyan"></i><span>02 <strong>DOWNTOWN</strong><small>City center / bank</small></span></div><div><i class="vbn-dot yellow"></i><span>03 <strong>PORT VICE</strong><small>Waterfront / warehouses</small></span></div><div><i class="vbn-dot green"></i><span>04 <strong>THE WETLANDS</strong><small>Outskirts / open roads</small></span></div><p class="vbn-legend-you"><i></i> YOUR POSITION</p></div></div><button class="vbn-back" type="button" data-action="back">← &nbsp; BACK</button></div>
       </section>
       <div class="vbn-toast" role="status" aria-live="polite"></div>`
   }

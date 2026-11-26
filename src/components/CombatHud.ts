@@ -20,6 +20,15 @@ export type CombatHudState = {
   rpg: RpgHudState
   homieCount: number
   turfWar: { zoneName: string; wave: number; totalWaves: number; remaining: number } | null
+  focusGauge?: number
+  focusActive?: boolean
+  protagonist?: 'jason' | 'lucia'
+  conductTier?: string
+  conductScore?: number
+  partnerBond?: number
+  partnerActive?: boolean
+  loadoutStatus?: string
+  turfPerksText?: string
 }
 
 export type CombatHudCallbacks = {
@@ -28,6 +37,7 @@ export type CombatHudCallbacks = {
   toggleAttachment: (attachment: AttachmentId) => void
   closeWheel: () => void
   closeStats: () => void
+  switchProtagonist?: () => void
 }
 
 function polarPt(cx: number, cy: number, r: number, angleDeg: number): [number, number] {
@@ -112,8 +122,11 @@ export class CombatHud {
     })
 
     this.statsEl.addEventListener('click', ev => {
-      if ((ev.target as Element).closest('[data-stats-close]')) {
+      const t = ev.target as Element
+      if (t.closest('[data-stats-close]')) {
         this.callbacks.closeStats()
+      } else if (t.closest('[data-switch-lead]')) {
+        this.callbacks.switchProtagonist?.()
       }
     })
   }
@@ -184,12 +197,18 @@ export class CombatHud {
     ]
     return `
       <div class="vbn-sa-head">
-        <div><small>VICE BAY / SAN ANDREAS RPG</small><strong>CHARACTER STATS</strong></div>
-        <button type="button" class="vbn-wheel-close" data-stats-close>J · ✕</button>
+        <div><small>VICE BAY / PROFILE &amp; RPG</small><strong>CHARACTER STATS</strong></div>
+        <div class="vbn-sa-head-acts">
+          <button type="button" class="vbn-wheel-att" data-switch-lead>LEAD: JASON [K]</button>
+          <button type="button" class="vbn-wheel-close" data-stats-close>J · ✕</button>
+        </div>
       </div>
       <div class="vbn-sa-badges">
         <span data-sa-tier>WEAPON: POOR</span>
         <span data-sa-homies>HOMIES CAP: 1</span>
+        <span data-sa-conduct>CONDUCT: AGGRESSIVE</span>
+        <span data-sa-bond>PARTNER BOND: 25%</span>
+        <span data-sa-loadout>SLING: 2/2 HG · 2/2 LG</span>
       </div>
       <div class="vbn-sa-bars">
         ${rows.map(([key, label, hint]) => `
@@ -199,14 +218,14 @@ export class CombatHud {
           </div>
         `).join('')}
       </div>
-      <p class="vbn-sa-foot">TRAIN MUSCLE AT BEACH/DOWNTOWN GYM · RECRUIT CREW WITH <kbd>G</kbd>/<kbd>H</kbd></p>
+      <p class="vbn-sa-foot" data-sa-foot>G SUMMON PARTNER / CREW · K SWITCH JASON/LUCIA · N NPC DIALOGUE</p>
     `
   }
 
-  triggerHitmarker(kind: 'normal' | 'critical' | 'armor' = 'normal'): void {
+  triggerHitmarker(kind: 'normal' | 'critical' | 'armor' | 'nonlethal' = 'normal'): void {
     const hm = this.reticleEl.querySelector<HTMLElement>('[data-hitmarker]')
     if (!hm) return
-    this.hitmarkerTimer = 0.2
+    this.hitmarkerTimer = 0.22
     hm.hidden = false
     hm.dataset.kind = kind
   }
@@ -235,7 +254,8 @@ export class CombatHud {
       }
     }
 
-    this.vignetteEl.hidden = !visibleInPlay || !state.wheelOpen
+    this.vignetteEl.hidden = !visibleInPlay || (!state.wheelOpen && !state.focusActive)
+    this.vignetteEl.classList.toggle('is-focus', Boolean(state.focusActive && !state.wheelOpen))
     this.wheelEl.hidden = !visibleInPlay || !state.wheelOpen
     if (visibleInPlay && state.wheelOpen) {
       this.syncWheel(state)
@@ -243,7 +263,7 @@ export class CombatHud {
 
     this.statsEl.hidden = !visibleInPlay || !state.statsOpen
     if (visibleInPlay && state.statsOpen) {
-      this.syncStats(state.rpg, state.homieCount)
+      this.syncStats(state)
     }
   }
 
@@ -290,11 +310,20 @@ export class CombatHud {
     }
   }
 
-  private syncStats(rpg: RpgHudState, homieCount: number): void {
+  private syncStats(state: CombatHudState): void {
+    const rpg = state.rpg
     const tierEl = this.statsEl.querySelector<HTMLElement>('[data-sa-tier]')
     const homiesEl = this.statsEl.querySelector<HTMLElement>('[data-sa-homies]')
+    const conductEl = this.statsEl.querySelector<HTMLElement>('[data-sa-conduct]')
+    const bondEl = this.statsEl.querySelector<HTMLElement>('[data-sa-bond]')
+    const loadoutEl = this.statsEl.querySelector<HTMLElement>('[data-sa-loadout]')
+    const leadBtn = this.statsEl.querySelector<HTMLElement>('[data-switch-lead]')
     if (tierEl) tierEl.textContent = `WEAPON: ${rpg.weaponTier}`
-    if (homiesEl) homiesEl.textContent = `SQUAD: ${homieCount} / ${rpg.maxHomies}`
+    if (homiesEl) homiesEl.textContent = `SQUAD: ${state.homieCount} / ${rpg.maxHomies}`
+    if (conductEl) conductEl.textContent = `PROFILE: ${(state.conductTier ?? 'Aggressive').toUpperCase()}`
+    if (bondEl) bondEl.textContent = `BOND: ${Math.round(state.partnerBond ?? 25)}%${state.partnerActive ? ' (ACTIVE)' : ''}`
+    if (loadoutEl && state.loadoutStatus) loadoutEl.textContent = state.loadoutStatus
+    if (leadBtn) leadBtn.textContent = `LEAD: ${(state.protagonist ?? 'jason').toUpperCase()} [K]`
 
     const values: Record<string, number> = {
       respect: rpg.respect,
@@ -304,6 +333,12 @@ export class CombatHud {
       hunger: rpg.hunger,
       weaponSkill: rpg.weaponSkill,
       drivingSkill: rpg.drivingSkill,
+    }
+    const footEl = this.statsEl.querySelector<HTMLElement>('[data-sa-foot]')
+    if (footEl) {
+      const meleePct = Math.round((rpg.muscle / 100) * 110)
+      const turfText = state.turfPerksText ? ` · ${state.turfPerksText}` : ''
+      footEl.textContent = `MELEE +${meleePct}% DMG · G CREW · K SWITCH LEAD${turfText}`
     }
     for (const [k, v] of Object.entries(values)) {
       const txt = this.statsEl.querySelector<HTMLElement>(`[data-sa-val="${k}"]`)

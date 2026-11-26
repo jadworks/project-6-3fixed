@@ -174,6 +174,29 @@ export class PoliceKnowledgeSystem {
     return mult
   }
 
+  /**
+   * Recognition cone modifiers based on memorized clues vs. player disguise/vehicle swap:
+   * - Masked while face is unknown narrows vision cone & shortens recognition distance.
+   * - Swapped outfit after previous sighting shrinks recognition range.
+   * - Clean plate car when police only know a prior car's plate significantly reduces recognition distance.
+   */
+  recognitionModifiers(currentVehiclePlate: string | null): { rangeMult: number; fovMult: number } {
+    let rangeMult = 1.0
+    let fovMult = 1.0
+    if (!this.knowledge.faceIdentified && this.masked) {
+      rangeMult *= 0.78
+      fovMult *= 0.85
+    }
+    if (this.outfitWasLogged && !this.knowledge.knownOutfit) {
+      rangeMult *= 0.82
+    }
+    if (currentVehiclePlate && this.knowledge.knownVehicle && this.knowledge.knownVehicle.plateNumber !== currentVehiclePlate) {
+      rangeMult *= 0.68
+      fovMult *= 0.88
+    }
+    return { rangeMult, fovMult }
+  }
+
   /** Build HUD APB tags and 1-line police dispatch ticker text. */
   getApbHudIntel(currentVehiclePlate: string | null, wanted: number): ApbHudIntel {
     const faceIdentified = this.knowledge.faceIdentified

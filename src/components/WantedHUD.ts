@@ -25,6 +25,7 @@ export class WantedHUD {
   private readonly segments: HTMLElement[]
   private readonly heatWrap: HTMLElement | null
   private readonly heatStatus: HTMLElement | null
+  private readonly dispatchEtaEl: HTMLElement | null
   private readonly heatFill: HTMLElement | null
   private readonly heatRing: SVGCircleElement | null
   private readonly apbWrap: HTMLElement | null
@@ -33,6 +34,7 @@ export class WantedHUD {
   private readonly apbWeapon: HTMLElement | null
   private readonly apbVehicle: HTMLElement | null
   private readonly apbTicker: HTMLElement | null
+  private readonly hotZoneEl: HTMLElement | null
   private readonly listeners = new Set<WantedStateListener>()
   private crimeLevel = 0
   private lastHeat?: HeatHudState
@@ -50,6 +52,7 @@ export class WantedHUD {
     this.segments = Array.from(this.element.querySelectorAll<HTMLElement>('[data-wanted-segment]'))
     this.heatWrap = this.element.querySelector<HTMLElement>('[data-heat-wrap]')
     this.heatStatus = this.element.querySelector<HTMLElement>('[data-value="heat-status"]')
+    this.dispatchEtaEl = this.element.querySelector<HTMLElement>('[data-dispatch-eta]')
     this.heatFill = this.element.querySelector<HTMLElement>('[data-heat-fill]')
     this.heatRing = this.element.querySelector<SVGCircleElement>('[data-heat-ring]')
     this.apbWrap = this.element.querySelector<HTMLElement>('[data-apb-wrap]')
@@ -58,6 +61,7 @@ export class WantedHUD {
     this.apbWeapon = this.element.querySelector<HTMLElement>('[data-apb-weapon]')
     this.apbVehicle = this.element.querySelector<HTMLElement>('[data-apb-vehicle]')
     this.apbTicker = this.element.querySelector<HTMLElement>('[data-apb-ticker]')
+    this.hotZoneEl = this.element.querySelector<HTMLElement>('[data-hot-zone]')
   }
 
   static markup(): string {
@@ -69,7 +73,10 @@ export class WantedHUD {
       <div class="vbn-stars" data-wanted aria-label="Wanted level: 0 out of 5">${stars}</div>
       <div class="vbn-heat-wrap" data-heat-wrap hidden>
         <div class="vbn-heat-meta">
-          <span class="vbn-heat-status" data-value="heat-status">IN SIGHT</span>
+          <div class="vbn-heat-row">
+            <span class="vbn-dispatch-eta" data-dispatch-eta hidden>ETA 0.0S</span>
+            <span class="vbn-heat-status" data-value="heat-status">IN SIGHT</span>
+          </div>
           <span class="vbn-heat-track"><i data-heat-fill></i></span>
         </div>
         <svg class="vbn-heat-ring" viewBox="0 0 36 36" aria-hidden="true">
@@ -85,6 +92,7 @@ export class WantedHUD {
           <span class="vbn-apb-tag" data-apb-vehicle hidden>CLEAN VEHICLE</span>
         </div>
         <div class="vbn-apb-ticker" data-apb-ticker hidden>APB: SCANNING…</div>
+        <div class="vbn-hotzone-pill" data-hot-zone hidden>HOT CRIME ZONE</div>
       </div>
     `
   }
@@ -128,7 +136,7 @@ export class WantedHUD {
     }
   }
 
-  update(wantedInput: number, heat?: HeatHudState, apb?: ApbHudIntel): void {
+  update(wantedInput: number, heat?: HeatHudState, apb?: ApbHudIntel, hotZoneLabel?: string | null): void {
     const wanted = Math.max(0, Math.min(6, Math.floor(Number.isFinite(wantedInput) ? wantedInput : 0)))
     this.crimeLevel = wanted
     this.lastHeat = heat
@@ -170,6 +178,13 @@ export class WantedHUD {
         if (this.heatStatus && this.heatStatus.textContent !== heat.statusText) {
           this.heatStatus.textContent = heat.statusText
         }
+        if (this.dispatchEtaEl) {
+          const showEta = heat.dispatchEta > 0.05 && !heat.inSight && heat.wanted > 0
+          this.dispatchEtaEl.hidden = !showEta
+          if (showEta) {
+            this.dispatchEtaEl.textContent = `ETA ${heat.dispatchEta.toFixed(1)}S`
+          }
+        }
         const pct = heat.phase === 'witness'
           ? heat.witnessProgress
           : heat.phase === 'evading'
@@ -187,9 +202,13 @@ export class WantedHUD {
 
     if (this.apbWrap) {
       const showApb = Boolean(
-        apb && (wanted > 0 || apb.faceIdentified || apb.outfitLogged || apb.outfitCleared || apb.vehicleApb || apb.cleanVehicle || apb.masked || this.tickerExpanded),
+        hotZoneLabel || (apb && (wanted > 0 || apb.faceIdentified || apb.outfitLogged || apb.outfitCleared || apb.vehicleApb || apb.cleanVehicle || apb.masked || this.tickerExpanded)),
       )
       this.apbWrap.hidden = !showApb
+      if (this.hotZoneEl) {
+        this.hotZoneEl.hidden = !hotZoneLabel
+        if (hotZoneLabel) this.hotZoneEl.textContent = `HOT ZONE: ${hotZoneLabel.toUpperCase()}`
+      }
       if (apb && showApb) {
         if (this.apbFace) {
           this.apbFace.textContent = apb.faceIdentified ? 'FACE ID\'D' : apb.masked ? 'MASKED / UNKNOWN' : 'FACE UNKNOWN'

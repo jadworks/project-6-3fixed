@@ -73,8 +73,9 @@ export class VicePlayer {
   private grounded = true
   private weaponKey = ''
   private slingKey = ''
-  private masked = false
   private holstered = false
+  private masked = false
+  private hairMat!: THREE.MeshStandardMaterial
   private tumbleTimer = 0
   private tumbleSpin = 0
   readonly cover: CoverState = {
@@ -94,6 +95,7 @@ export class VicePlayer {
     this.shirtMat = material(0x49b9be)
     this.pantsMat = material(0x222944)
     const hair = material(0x211916)
+    this.hairMat = hair
     this.jacketMat = material(0x17263d)
     const mesh = (w: number, h: number, d: number, mat: THREE.Material, x: number, y: number, z: number) => {
       const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat)
@@ -140,6 +142,27 @@ export class VicePlayer {
     this.masked = masked
     this.maskMesh.visible = masked
     this.sunglassesMesh.visible = !masked
+  }
+
+  get isMasked(): boolean {
+    return this.masked
+  }
+
+  setProtagonistAppearance(protagonist: 'jason' | 'lucia', hairstyle?: string): void {
+    if (protagonist === 'lucia') {
+      this.shirtMat.color.setHex(0xeb5a94)
+      this.jacketMat.color.setHex(0x1b2135)
+      this.pantsMat.color.setHex(0x252a40)
+      this.hairMat.color.setHex(0x1a1210)
+    } else {
+      this.shirtMat.color.setHex(0x49b9be)
+      this.jacketMat.color.setHex(0x17263d)
+      this.pantsMat.color.setHex(0x222944)
+      this.hairMat.color.setHex(0x2a1d17)
+    }
+    if (hairstyle === 'Platinum Fade') this.hairMat.color.setHex(0xd6d2c4)
+    else if (hairstyle === 'Vice Neon Crop') this.hairMat.color.setHex(0xe84d95)
+    else if (hairstyle === 'Clean Taper') this.hairMat.color.setHex(0x1e1816)
   }
 
   setHolstered(holstered: boolean): void {

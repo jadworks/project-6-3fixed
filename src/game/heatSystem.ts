@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { CONFIG } from './config'
 import type { PlayerHeatSave } from './saveSystem'
 
 export type HeatPhase = 'clear' | 'witness' | 'pursuit' | 'evading'
@@ -25,6 +26,8 @@ export type HeatHudState = {
   witnessProgress: number  // 0..1 (progress of witness reporting crime)
   reinforcementProgress: number // 0..1 (buildup toward next police reinforcement wave)
   statusText: string
+  dispatchEta: number
+  dispatchLatency: number
   lkp: { x: number; z: number } | null
   searchRadius: number
   dispatchBanner: { code: string; text: string; level: number } | null
@@ -58,7 +61,9 @@ export class HeatSystem {
   private evadeTimer = 0
   private evadeDuration = 14
   private witnessTimer = 0
-  private readonly witnessDuration = 3.5
+  private witnessDuration = CONFIG.police.witnessReportSeconds
+  private dispatchLatencySeconds = CONFIG.police.dispatchLatencySeconds
+  private highHeatDispatchLatencySeconds = CONFIG.police.highHeatDispatchLatencySeconds
   private pendingWitnessStars = 0
   private witnessOrigin = new THREE.Vector3()
   private vehicleSwapBonusTimer = 0
@@ -67,6 +72,38 @@ export class HeatSystem {
   private banner: DispatchBanner | null = null
   private activeWitnessBlips: WitnessBlip[] = []
   private externalWitnessDriven = false
+  private dispatchEta = 0
+
+  constructor(options?: { dispatchLatencySeconds?: number; highHeatDispatchLatencySeconds?: number; witnessReportSeconds?: number }) {
+    if (options?.dispatchLatencySeconds !== undefined || options?.highHeatDispatchLatencySeconds !== undefined) {
+      this.setDispatchLatency(
+        options.dispatchLatencySeconds ?? this.dispatchLatencySeconds,
+        options.highHeatDispatchLatencySeconds,
+      )
+    }
+    if (options?.witnessReportSeconds !== undefined && Number.isFinite(options.witnessReportSeconds)) {
+      this.witnessDuration = THREE.MathUtils.clamp(options.witnessReportSeconds, 1, 10)
+    }
+  }
+
+  setDispatchLatency(standardSeconds: number, highHeatSeconds?: number): void {
+    if (Number.isFinite(standardSeconds)) {
+      this.dispatchLatencySeconds = THREE.MathUtils.clamp(standardSeconds, 0, 15)
+    }
+    if (highHeatSeconds !== undefined && Number.isFinite(highHeatSeconds)) {
+      this.highHeatDispatchLatencySeconds = THREE.MathUtils.clamp(highHeatSeconds, 0, 15)
+    } else if (Number.isFinite(standardSeconds)) {
+      this.highHeatDispatchLatencySeconds = THREE.MathUtils.clamp(Math.min(standardSeconds, standardSeconds * 0.78), 0, 15)
+    }
+  }
+
+  getDispatchEta(): number {
+    return this.dispatchEta
+  }
+
+  private getConfiguredDispatchLatency(level: number): number {
+    return level >= 4 ? this.highHeatDispatchLatencySeconds : this.dispatchLatencySeconds
+  }
 
   reset(): void {
     this.wanted = 0
@@ -82,6 +119,7 @@ export class HeatSystem {
     this.banner = null
     this.activeWitnessBlips = []
     this.externalWitnessDriven = false
+    this.dispatchEta = 0
   }
 
   restoreFromSave(saved?: PlayerHeatSave): void {
@@ -138,6 +176,7 @@ export class HeatSystem {
       this.evadeDuration = STAR_COOLDOWN_SECONDS[this.wanted] ?? 20
       this.evadeTimer = 0
       this.reinforcementTimer = 0
+      if (prev === 0 && this.wanted > 0) this.dispatchEta = this.getConfiguredDispatchLatency(this.wanted)
       if (this.wanted > prev) {
         this.triggerDispatchBanner(this.wanted)
       } else {
@@ -173,12 +212,15 @@ export class HeatSystem {
       }
       this.witnessTimer = 0
       this.pendingWitnessStars = 0
-      this.inSight = policeSeePlayer || immediate
+      this.inSight = policeSeePlayer
       this.phase = this.inSight ? 'pursuit' : 'evading'
       this.lastKnownPos.copy(position)
       this.hasLkp = true
       this.evadeDuration = STAR_COOLDOWN_SECONDS[this.wanted] ?? 20
       this.evadeTimer = 0
+      if (prev === 0 && this.wanted > 0 && !policeSeePlayer) {
+        this.dispatchEta = this.getConfiguredDispatchLatency(this.wanted)
+      }
       if (this.wanted > prev) {
         this.reinforcementTimer = 0
         this.triggerDispatchBanner(this.wanted)
@@ -225,6 +267,7 @@ export class HeatSystem {
     let dispatchConfirmed = false
     let reinforcementEscalated = false
     this.vehicleSwapBonusTimer = Math.max(0, this.vehicleSwapBonusTimer - dt)
+    this.dispatchEta = Math.max(0, this.dispatchEta - dt)
     if (this.banner) {
       this.banner.timer -= dt
       if (this.banner.timer <= 0) this.banner = null
@@ -243,6 +286,7 @@ export class HeatSystem {
         this.evadeDuration = STAR_COOLDOWN_SECONDS[this.wanted]
         this.evadeTimer = 0
         this.reinforcementTimer = 0
+        this.dispatchEta = 0
         this.triggerDispatchBanner(this.wanted)
         dispatchConfirmed = true
       } else if (playerPos.distanceTo(this.witnessOrigin) > 45) {
@@ -263,6 +307,7 @@ export class HeatSystem {
           this.evadeDuration = STAR_COOLDOWN_SECONDS[this.wanted]
           this.evadeTimer = 0
           this.reinforcementTimer = 0
+          this.dispatchEta = this.getConfiguredDispatchLatency(this.wanted)
           this.triggerDispatchBanner(this.wanted)
           dispatchConfirmed = true
         }
@@ -276,11 +321,13 @@ export class HeatSystem {
         this.inSight = false
         this.hasLkp = false
       }
+      this.dispatchEta = 0
       return { starDropped, dispatchConfirmed, reinforcementEscalated }
     }
 
     this.inSight = policeSeePlayer
     if (policeSeePlayer) {
+      this.dispatchEta = 0
       this.phase = 'pursuit'
       this.lastKnownPos.copy(playerPos)
       this.hasLkp = true
@@ -345,7 +392,11 @@ export class HeatSystem {
     else if (this.wanted === 6) statusText = 'MILITARY LOCKDOWN — SEARCHING LKP'
     else if (this.phase === 'pursuit') statusText = 'IN SIGHT — ACTIVE PURSUIT'
     else if (this.phase === 'evading') {
-      statusText = this.vehicleSwapBonusTimer > 0 ? 'VEHICLE SWAPPED — EVADING FAST' : 'OUT OF SIGHT — SEARCHING LKP'
+      statusText = this.dispatchEta > 0
+        ? `DISPATCH ETA ${this.dispatchEta.toFixed(1)}S — UNITS INBOUND`
+        : this.vehicleSwapBonusTimer > 0
+          ? 'VEHICLE SWAPPED — EVADING FAST'
+          : 'OUT OF SIGHT — SEARCHING LKP'
     }
     return {
       wanted: this.wanted,
@@ -355,6 +406,8 @@ export class HeatSystem {
       witnessProgress,
       reinforcementProgress,
       statusText,
+      dispatchEta: this.dispatchEta,
+      dispatchLatency: this.getConfiguredDispatchLatency(this.wanted),
       lkp: this.hasLkp && this.wanted > 0 ? { x: this.lastKnownPos.x, z: this.lastKnownPos.z } : null,
       searchRadius: 24 + this.wanted * 10,
       dispatchBanner: this.banner ? { code: this.banner.code, text: this.banner.text, level: this.banner.level } : null,

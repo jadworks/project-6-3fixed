@@ -75,6 +75,7 @@ export class Renderer {
 
   /** Attach a procedural PBR studio reflection environment so metallic vehicles and wet streets catch realistic highlights. */
   attachEnvironment(scene: THREE.Scene): void {
+    if (this.isSoftwareGl) return
     if (this.envScene === scene && this.envTarget) return
     this.envTarget?.dispose()
     const pmrem = new THREE.PMREMGenerator(this.gl)

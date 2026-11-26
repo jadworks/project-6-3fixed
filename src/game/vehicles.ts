@@ -18,6 +18,16 @@ export type Vehicle = {
   plateNumber: string
   colorName: string
   vehicleClass: 'compact' | 'sedan' | 'muscle' | 'sport' | 'suv' | 'truck' | 'motorbike' | 'boat' | 'helicopter' | 'taxi'
+  securityTier: 1 | 2 | 3
+  hotwired: boolean
+  alarmActive: boolean
+  alarmTimer: number
+  trackerActive: boolean
+  trackerPingTimer: number
+  isPersonal: boolean
+  isElectric: boolean
+  fuel: number
+  trunkWeapons: string[]
 }
 
 export type VehicleSurface = 'asphalt' | 'wet' | 'sand' | 'dirt' | 'water'
@@ -40,6 +50,13 @@ export type VehicleTelemetry = {
   colorName: string
   damageState: string
   windshieldCracked: boolean
+  securityTier: 1 | 2 | 3
+  fuel: number
+  isElectric: boolean
+  trackerActive: boolean
+  isPersonal: boolean
+  alarmActive: boolean
+  hotwiringProgress: number
 }
 
 export type VehicleCollisionReaction = {
@@ -135,6 +152,8 @@ type VehicleParts = {
   damageStage: number
   phase: number
   lastDeformHash: number
+  hotwireDuration: number
+  hotwireProgress: number
 }
 
 type Particle = {
@@ -291,6 +310,11 @@ export class VehicleSystem {
     this.addVehicle('motorbike', 'Dock Bike', '#f4c545', -34, 34, Math.PI / 2, BIKE, 'motorbike')
     this.addVehicle('boat', 'Bay Runner', '#4bbad3', 95, 0, Math.PI, BOAT, 'boat')
     this.addVehicle('helicopter', 'Bay Helicopter', '#d9e3df', 16, 29, 0, HELI, 'helicopter')
+    if (this.vehicles[0]) {
+      this.vehicles[0].isPersonal = true
+      this.vehicles[0].hotwired = true
+      this.vehicles[0].trackerActive = false
+    }
   }
 
   /** Configure authoritative world OBB colliders and ramps for crisp vehicle physics. */
@@ -355,13 +379,101 @@ export class VehicleSystem {
     return best
   }
 
-  /** Wrecks cannot be entered. Resets seatbelt latch timer (1.5s Niko Bellic buckle). */
+  /** Wrecks cannot be entered. Handles Security Tiers 1–3, alarms, hotwire timers & trackers. */
   enter(vehicle: Vehicle): void {
     if (this.parts.has(vehicle) && vehicle.health > 0) {
       this.active = vehicle
       const data = this.parts.get(vehicle)
-      if (data) data.seatbeltTimer = 0
+      if (data) {
+        data.seatbeltTimer = 0
+        if (vehicle.isPersonal || vehicle.hotwired) {
+          data.hotwireProgress = 1
+        } else if (vehicle.securityTier === 1) {
+          vehicle.hotwired = true
+          data.hotwireProgress = 1
+        } else if (vehicle.securityTier === 2) {
+          vehicle.alarmActive = true
+          vehicle.alarmTimer = 9.0
+          data.hotwireProgress = 0.25
+        } else {
+          vehicle.alarmActive = true
+          vehicle.alarmTimer = 11.0
+          vehicle.trackerActive = true
+          data.hotwireProgress = 0.1
+        }
+      }
     }
+  }
+
+  /** Step vehicle security hotwire, alarms, GPS tracker pings, and fuel/EV battery consumption. */
+  stepSecurityAndFuel(
+    dt: number,
+    fuelEnabled: boolean,
+    speedNorm: number,
+  ): { trackerPing: boolean; alarmSounding: boolean; outOfFuel: boolean } {
+    const v = this.active
+    if (!v) return { trackerPing: false, alarmSounding: false, outOfFuel: false }
+    const data = this.parts.get(v)
+    let trackerPing = false
+    if (data && !v.hotwired && !v.isPersonal) {
+      data.hotwireProgress = clamp(data.hotwireProgress + dt / Math.max(0.4, data.hotwireDuration), 0, 1)
+      if (data.hotwireProgress >= 1) {
+        v.hotwired = true
+        v.alarmActive = false
+      }
+    }
+    if (v.alarmActive) {
+      v.alarmTimer = Math.max(0, v.alarmTimer - dt)
+      if (v.alarmTimer <= 0) v.alarmActive = false
+    }
+    if (v.trackerActive && !v.isPersonal) {
+      v.trackerPingTimer -= dt
+      if (v.trackerPingTimer <= 0) {
+        v.trackerPingTimer = 7.5
+        trackerPing = true
+      }
+    }
+    if (fuelEnabled && v.hotwired && v.type !== 'boat' && v.type !== 'helicopter') {
+      const burn = (0.14 + speedNorm * 0.42) * (v.isElectric ? 0.85 : 1)
+      v.fuel = clamp(v.fuel - burn * dt, 0, 100)
+    }
+    return {
+      trackerPing,
+      alarmSounding: v.alarmActive,
+      outOfFuel: fuelEnabled && v.fuel <= 0.1,
+    }
+  }
+
+  refuel(vehicle: Vehicle, amount = 100): void {
+    vehicle.fuel = clamp(vehicle.fuel + amount, 0, 100)
+  }
+
+  stripTracker(vehicle: Vehicle): void {
+    vehicle.trackerActive = false
+    vehicle.alarmActive = false
+    vehicle.hotwired = true
+  }
+
+  setPersonalVehicle(vehicle: Vehicle): void {
+    for (const other of this.vehicles) other.isPersonal = false
+    vehicle.isPersonal = true
+    vehicle.hotwired = true
+    vehicle.alarmActive = false
+    vehicle.trackerActive = false
+  }
+
+  getPersonalVehicle(): Vehicle | null {
+    return this.vehicles.find(v => v.isPersonal && v.health > 0) ?? this.vehicles[0] ?? null
+  }
+
+  getTrunkPosition(vehicle: Vehicle): THREE.Vector3 {
+    const data = this.parts.get(vehicle)
+    const dist = (data?.handling.length ?? 2.1) + 0.9
+    return new THREE.Vector3(
+      vehicle.root.position.x + Math.sin(vehicle.heading) * dist,
+      vehicle.root.position.y,
+      vehicle.root.position.z + Math.cos(vehicle.heading) * dist,
+    )
   }
 
   /** Exit on the right-hand side. The caller owns player visibility and teleportation. */
@@ -485,6 +597,13 @@ export class VehicleSystem {
       colorName: v.colorName,
       damageState,
       windshieldCracked: d.windshieldCracked,
+      securityTier: v.securityTier,
+      fuel: v.fuel,
+      isElectric: v.isElectric,
+      trackerActive: v.trackerActive,
+      isPersonal: v.isPersonal,
+      alarmActive: v.alarmActive,
+      hotwiringProgress: v.hotwired || v.isPersonal ? 1 : d.hotwireProgress,
     }
   }
 
@@ -726,6 +845,13 @@ export class VehicleSystem {
     root.add(model)
     const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.45, roughness: 0.36 })
     const brakeLight = new THREE.MeshStandardMaterial({ color: '#ef273b', emissive: '#ef273b', emissiveIntensity: 1.4, roughness: 0.25 })
+    const securityTier: 1 | 2 | 3 =
+      vehicleClass === 'sport' || vehicleClass === 'boat' || vehicleClass === 'helicopter'
+        ? 3
+        : vehicleClass === 'compact' || vehicleClass === 'taxi' || vehicleClass === 'motorbike'
+          ? 1
+          : 2
+    const hotwireDuration = securityTier === 1 ? 0.2 : securityTier === 2 ? 1.8 : 3.2
     const parts: VehicleParts = {
       model, paint, paintColor: paint.color.clone(), brakeLight, handling,
       wheels: [], rotor: null, tailRotor: null, panels: [],
@@ -737,12 +863,23 @@ export class VehicleSystem {
       axleBias: 0, engineStalled: false, crankTimer: 0, seatbeltTimer: 0,
       smokeTimer: 0, fireTimer: 0, impactCooldown: 0, punctureTimer: 0, damageStage: 0,
       phase: Math.random() * Math.PI * 2, lastDeformHash: 0,
+      hotwireDuration, hotwireProgress: securityTier === 1 ? 1 : 0,
     }
     const vehicle: Vehicle = {
       root, type, name, speed: 0, health: 100, heading, velocity: new THREE.Vector3(),
       plateNumber: randomPlate(this.plateCounter++),
       colorName: colorLabelFromHex(color),
       vehicleClass,
+      securityTier,
+      hotwired: securityTier === 1,
+      alarmActive: false,
+      alarmTimer: 0,
+      trackerActive: false,
+      trackerPingTimer: 4.0,
+      isPersonal: false,
+      isElectric: vehicleClass === 'sport' && name === 'Neon Sport',
+      fuel: 72 + Math.round(Math.random() * 26),
+      trunkWeapons: ['carbine', 'pump_shotgun'],
     }
     if (type === 'motorbike') this.buildBike(parts)
     else if (type === 'truck') this.buildTruck(parts)
@@ -825,16 +962,19 @@ export class VehicleSystem {
     const brakingHard = (input.throttle < -0.55 && longitudinal > 2.5) || input.handbrake
     const absLockup = !helicopter && !boat && brakingHard && (!h.hasAbs || input.handbrake)
     if (absLockup) grip *= input.handbrake ? 0.22 : 0.45
-    else if (input.handbrake && !helicopter) grip *= 0.22
+    else if (h.hasAbs && brakingHard && !input.handbrake && !helicopter && !boat) {
+      // ABS rapid cadence modulation keeps lateral steering bite under hard braking
+      grip *= 0.86 + 0.12 * Math.sin(this.time * 38)
+    } else if (input.handbrake && !helicopter) grip *= 0.22
 
-    if (v.health <= 0 || data.engineStalled) power = 0
+    if (v.health <= 0 || data.engineStalled || !v.hotwired || v.fuel <= 0.1) power = 0
     else if (v.health < 25) power *= 0.55
 
     // Non-ABS wheel lockup cuts steering authority under full footbrake
     const lockSteerMult = absLockup && !input.handbrake && input.throttle < -0.5 ? 0.52 : 1.0
     const turnSpeed = helicopter
       ? h.turn * (0.65 + 0.35 * Math.min(1, absLong / 10))
-      : h.turn * Math.min(1, absLong / 4.8) / (1 + absLong * 0.038) * lockSteerMult
+      : h.turn * Math.min(1, Math.max(0.28, absLong / 4.2)) / (1 + absLong * 0.036) * lockSteerMult
     const driftTurn = input.handbrake && !helicopter ? 1.28 : 1
     const steerWithAxle = clamp(input.steer + (absLong > 2 ? data.axleBias : 0), -1, 1)
     v.heading -= steerWithAxle * turnSpeed * (helicopter ? 1 : forwardSign) * driftTurn * dt
@@ -845,9 +985,14 @@ export class VehicleSystem {
     longitudinal = v.velocity.dot(this.scratchForward)
     let lateral = v.velocity.dot(this.scratchRight)
 
-    const throttle = v.health > 0 && !data.engineStalled ? input.throttle : 0
-    const braking = (throttle > 0.02 && longitudinal < -0.4) || (throttle < -0.02 && longitudinal > 0.4)
-    const acceleration = braking ? h.brake * (surface === 'wet' ? 0.72 : 1) : h.acceleration * power * (0.85 + 0.15 * massFactor)
+    const throttle = v.health > 0 && !data.engineStalled && v.hotwired && v.fuel > 0.1 ? input.throttle : 0
+    const braking = (throttle > 0.02 && longitudinal < -0.4) || (throttle < -0.02 && longitudinal > 0.25)
+    const absBrakePulse = h.hasAbs && braking && !input.handbrake && !helicopter && !boat
+      ? 0.94 + 0.08 * Math.sin(this.time * 38)
+      : 1.0
+    const acceleration = braking
+      ? h.brake * absBrakePulse * (surface === 'wet' ? 0.72 : 1)
+      : h.acceleration * power * (0.85 + 0.15 * massFactor)
     // Wheel spin burnout from standstill before tires hook up
     const launchSlip = !helicopter && !boat && throttle > 0.75 && absLong < 6.5 ? 0.82 : 1.0
     longitudinal += throttle * acceleration * launchSlip * dt

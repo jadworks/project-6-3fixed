@@ -163,6 +163,27 @@ export class SanAndreasRpg {
     this.respect = clamp100(this.respect + 10)
   }
 
+  recordRobbery(lootCash: number, cleanEscape: boolean): { respectGain: number } {
+    const prevRespect = this.respect
+    const cashFactor = Math.min(4, Math.max(0, lootCash) / 1200)
+    const gain = (cleanEscape ? 4.5 : 2.5) + cashFactor
+    this.respect = clamp100(this.respect + gain)
+    this.staminaSkill = clamp100(this.staminaSkill + 1.0)
+    return { respectGain: Math.round((this.respect - prevRespect) * 10) / 10 }
+  }
+
+  recordEvadeHeat(starsCleared: number): { respectGain: number; drivingGain: number } {
+    const stars = Math.max(1, Math.min(6, Math.floor(starsCleared)))
+    const prevRespect = this.respect
+    const prevDriving = this.drivingSkill
+    this.respect = clamp100(this.respect + stars * 2.2)
+    this.drivingSkill = clamp100(this.drivingSkill + stars * 1.1)
+    return {
+      respectGain: Math.round((this.respect - prevRespect) * 10) / 10,
+      drivingGain: Math.round((this.drivingSkill - prevDriving) * 10) / 10,
+    }
+  }
+
   getHudState(): RpgHudState {
     return {
       respect: Math.round(this.respect),

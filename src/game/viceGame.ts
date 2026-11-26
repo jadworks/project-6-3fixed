@@ -14,7 +14,7 @@ import { CutsceneDirector, type CutsceneId, playMissionCard } from './cutscene'
 import { HeatSystem } from './heatSystem'
 import { OnlineLeaderboard } from './onlineLeaderboard'
 import { signInWithGoogle, signOutPlayer, subscribeAuth } from '../firebase/client'
-import { loadCloudPlayerSave, mergeCitySaves, persistPlayerState } from '../firebase/cloudStore'
+import { flushPendingCloudSync, loadCloudPlayerSave, mergeCitySaves, persistPlayerState } from '../firebase/cloudStore'
 import type { User } from 'firebase/auth'
 import { resolvePlayerCollision, supportHeightAt, worldRayDistance } from './worldCollision'
 import { CONFIG } from './config'
@@ -24,8 +24,31 @@ import { SanAndreasRpg } from './sanAndreasRpg'
 import { GangTurfSystem, type TurfZoneState } from './gangTurf'
 import { PoliceKnowledgeSystem } from './policeKnowledge'
 import type { PhoneRingtone } from '../components/SmartphoneHud'
+import type { HudDrawerState } from '../components/GameHud'
 import { TouchControls } from '../components/TouchControls'
 import { WEAPON_CATALOG } from './weapons'
+import { StoreWorld, getCooldownRemaining, getStoreStatus } from './storeWorld'
+import {
+  STORES_CATALOG,
+  STORE_CATEGORY_LABELS,
+  applyWastedEconomyPenalty,
+  depositCashToBank,
+  fenceUncleanedLoot,
+  getStoreById,
+  type StoreMenuItem,
+} from './storesCatalog'
+import {
+  HotZoneTracker,
+  LOADOUT_LIMITS,
+  PartnerWingman,
+  bondBonusMultipliers,
+  getConductTier,
+  isHandgunWeapon,
+  isLongGunWeapon,
+  resolveNpcDialogue,
+  type NpcDialogueTone,
+  type ProtagonistId,
+} from './gta6Systems'
 
 type Mode = 'title' | 'playing' | 'pause' | 'map' | 'cutscene'
 type Tracer = { mesh: THREE.Line; life: number }
@@ -38,9 +61,30 @@ type ThrownProjectile = {
   radius: number
   impactDetonate: boolean
 }
-const WEATHERS = ['day', 'sunset', 'overcast', 'rain', 'night'] as const
+const WEATHERS = ['day', 'sunset', 'overcast', 'haze', 'fog', 'rain', 'storm', 'night'] as const
 
-export class ViceGame {
+interface OverlayResetOptions {
+  keepWheel?: boolean
+  keepPhone?: boolean
+  keepDrawer?: boolean
+}
+
+interface NearbyInteractables {
+  nearVehicle: ReturnType<VehicleSystem['nearest']>
+  bay: ViceWorld['resprayBays'][number] | undefined
+  personalCar: ReturnType<VehicleSystem['getPersonalVehicle']>
+  nearPersonalTrunk: boolean
+  storeWorld: ReturnType<StoreWorld['findNearestInteractable']>
+  amb: ReturnType<CityLife['getServiceUnitState']>
+  cabNearby: boolean
+  jacob: ReturnType<CityLife['getServiceUnitState']>
+  gym: ViceWorld['gyms'][number] | undefined
+  stand: ViceWorld['foodStands'][number] | undefined
+  atIntroBeacon: boolean
+  atSafehouse: boolean
+}
+
+abstract class ViceSessionBase {
   readonly world = new ViceWorld()
   readonly player = new VicePlayer(this.world.spawn)
   readonly vehicles = new VehicleSystem(this.world.scene)
@@ -52,16 +96,308 @@ export class ViceGame {
   readonly arsenal = new WeaponArsenal()
   readonly turf = new GangTurfSystem(this.world.scene)
   readonly knowledge = new PoliceKnowledgeSystem()
+  readonly storeWorld = new StoreWorld(this.world.scene)
+  readonly partner = new PartnerWingman(this.world.scene)
+  readonly hotZones = new HotZoneTracker()
   readonly cutscenes: CutsceneDirector
   readonly save = loadCitySave()
   readonly camera = new THREE.PerspectiveCamera(60, 1, .1, 980)
+  protected readonly robbedStores: Set<string>
+
+  mode: Mode = 'title'
+  protected yaw = 0
+  protected pitch = .2
+  protected elapsed = 0
+  protected wheelOpen = false
+  protected wheelPinned = false
+  protected statsOpen = false
+  protected phoneOpen = false
+  protected holstered = false
+  protected playerArmor = 0
+  protected ringtone: PhoneRingtone = 'classic'
+  protected prevEngineStalled = false
+  protected currentTimeLabel = '16:13'
+  protected drawer: HudDrawerState | null = null
+  protected activeStoreId: string | null = null
+  protected activeDialogueNpcId: string | null = null
+  protected activeDialogueWitness = false
+  protected taxiRide: { dest: 'objective' | 'safehouse' | 'respray'; target: THREE.Vector3; label: string; cabPos: THREE.Vector3; cabHeading: number } | null = null
+  protected lastHailedCabPos: THREE.Vector3 | null = null
+  abstract readonly ui: GameHud
+  abstract readonly touchControls: TouchControls
+
+  constructor(
+    protected readonly renderer: Renderer,
+    protected readonly input: Input,
+    protected readonly audio: ViceAudio,
+  ) {
+    this.renderer.attachEnvironment(this.world.scene)
+    this.world.colliders.push(...this.storeWorld.colliders)
+    this.vehicles.setWorldGeometry(this.world.colliders, this.world.ramps)
+    this.life.setWorldColliders(this.world.colliders)
+    this.turf.setWorldColliders(this.world.colliders)
+    this.cutscenes = new CutsceneDirector(this.world.scene, this.audio)
+    this.robbedStores = new Set(this.save.robbedStores)
+  }
+
+  abstract persist(syncCloud?: boolean): void
+
+  protected closeOverlays(opts: OverlayResetOptions = {}): void {
+    if (!opts.keepWheel) {
+      this.wheelOpen = false
+      this.wheelPinned = false
+    }
+    if (!opts.keepPhone) {
+      this.phoneOpen = false
+    }
+    if (!opts.keepDrawer) {
+      this.drawer = null
+      this.activeStoreId = null
+      this.activeDialogueNpcId = null
+    }
+  }
+
+  protected syncPointerLock(): void {
+    if (this.mode === 'playing' && !this.wheelOpen && !this.phoneOpen && !this.drawer) {
+      this.input.lockPointer()
+    } else {
+      this.input.unlockPointer()
+    }
+  }
+
+  protected setPhoneOpen(open: boolean): void {
+    if (this.mode !== 'playing' && open) return
+    this.phoneOpen = open
+    if (open) {
+      this.closeOverlays({ keepPhone: true, keepDrawer: true })
+    }
+    this.syncPointerLock()
+  }
+
+  protected togglePhone(): void {
+    this.setPhoneOpen(!this.phoneOpen)
+    if (this.phoneOpen && this.ringtone !== 'silent') this.audio.phoneTone('beep')
+  }
+
+  protected closeDrawer(): void {
+    this.closeOverlays({ keepWheel: true, keepPhone: true })
+    this.syncPointerLock()
+  }
+
+  protected syncWeaponVisual(): void {
+    const spec = this.arsenal.current
+    this.player.setWeaponVisual(
+      spec.category,
+      spec.id,
+      this.arsenal.hasAttachment(spec.id, 'suppressor'),
+      this.arsenal.lastLongGunId,
+    )
+  }
+
+  protected equipWeaponSpec(spec: WeaponSpec, toastMessage?: string, unpinWheel = false): void {
+    this.holstered = false
+    this.player.setHolstered(false)
+    this.syncWeaponVisual()
+    if (unpinWheel) {
+      this.wheelPinned = false
+      this.wheelOpen = false
+    }
+    this.ui.toast(toastMessage ?? `EQUIPPED: ${spec.name.toUpperCase()}`)
+  }
+
+  protected toggleWeaponAttachment(att: AttachmentId): void {
+    const spec = this.arsenal.current
+    if (!spec.supportsAttachments.includes(att)) {
+      this.ui.toast(`${spec.shortName} has no ${att} slot`)
+      return
+    }
+    const enabled = this.arsenal.toggleAttachment(att)
+    this.syncWeaponVisual()
+    this.ui.toast(`${spec.shortName}: ${att.toUpperCase()} ${enabled ? 'EQUIPPED' : 'REMOVED'}`)
+    this.persist(false)
+  }
+
+  protected currentRecognitionModifiers() {
+    return this.knowledge.recognitionModifiers(this.vehicles.active?.plateNumber ?? null)
+  }
+
+  protected swapDisguiseOutfit() {
+    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers())
+    const { outfit } = this.knowledge.cycleOutfit(policeSee)
+    this.player.setOutfit(outfit)
+    return { outfit, policeSee }
+  }
+
+  protected restockAllAmmo(pack: 'full' | 'safehouse'): void {
+    const amounts = pack === 'full'
+      ? { handgun: 60, smg: 120, shotgun: 24, rifle: 90, precision: 20, heavy: 4, throwable: 4 }
+      : { handgun: 45, smg: 90, shotgun: 16, rifle: 60, precision: 15, heavy: 4, throwable: 3 }
+    this.arsenal.addAmmo('handgun', amounts.handgun)
+    this.arsenal.addAmmo('smg', amounts.smg)
+    this.arsenal.addAmmo('shotgun', amounts.shotgun)
+    this.arsenal.addAmmo('rifle', amounts.rifle)
+    this.arsenal.addAmmo('precision', amounts.precision)
+    this.arsenal.addAmmo('heavy', amounts.heavy)
+    this.arsenal.addAmmo('throwable', amounts.throwable)
+  }
+
+  protected togglePlayerCover(verbose = false): void {
+    if (this.mode !== 'playing' || this.vehicles.active || this.wheelOpen || this.phoneOpen) return
+    const carCoords = this.vehicles.vehicles.map(v => ({
+      x: v.root.position.x,
+      z: v.root.position.z,
+      heading: v.heading,
+      halfWidth: 1.05,
+    }))
+    const inCover = this.player.toggleCover(this.world.colliders, carCoords)
+    if (!inCover) return
+    if (verbose) {
+      this.ui.toast(this.player.cover.coverBehindCar
+        ? 'COVER BEHIND CAR — LMB BLIND-FIRE / RMB AIM PEEK'
+        : 'IN COVER — LMB BLIND-FIRE / RMB AIM PEEK')
+    } else {
+      this.ui.toast(this.player.cover.coverBehindCar ? 'COVER BEHIND CAR' : 'IN COVER')
+    }
+  }
+
+  protected toggleBandanaMask(verbose = false): void {
+    if (this.mode !== 'playing') return
+    const masked = this.knowledge.toggleMask()
+    this.player.setMasked(masked)
+    if (verbose) {
+      this.ui.toast(masked ? 'BANDANA MASK ON — FACE CONCEALED (+EVASION)' : 'BANDANA MASK OFF')
+    } else {
+      this.ui.toast(masked ? 'BANDANA MASK ON' : 'BANDANA MASK OFF')
+    }
+  }
+
+  protected recruitCrewOrPartner(allowPartnerFallback: boolean): void {
+    if (this.mode !== 'playing') return
+    const res = this.turf.recruitNearby(this.player.root.position, this.rpg.maxHomies)
+    if (res.recruitedNow > 0) {
+      this.audio.recruitWhistle()
+      this.ui.toast(allowPartnerFallback
+        ? `RECRUITED ${res.recruitedNow} HOMIE${res.recruitedNow > 1 ? 'S' : ''} (SQUAD ${res.totalSquad}/${this.rpg.maxHomies})`
+        : `RECRUITED ${res.recruitedNow} HOMIE${res.recruitedNow > 1 ? 'S' : ''}`)
+      return
+    }
+    if (!allowPartnerFallback) {
+      this.ui.toast(res.atCap ? 'SQUAD AT MAX CAPACITY' : 'NO ALLIED CREW NEARBY')
+      return
+    }
+    const lead: ProtagonistId = this.save.protagonist === 'lucia' ? 'lucia' : 'jason'
+    const activeNow = this.partner.toggle(this.player.root.position, lead)
+    const partnerName = lead === 'jason' ? 'LUCIA' : 'JASON'
+    this.audio.recruitWhistle()
+    this.ui.toast(activeNow ? `${partnerName} JOINED AS ACTIVE PARTNER WINGMAN!` : `${partnerName} STANDING DOWN`)
+  }
+
+  protected clearActiveRide(placeAt?: THREE.Vector3, safeAnchor?: THREE.Vector3): void {
+    if (this.vehicles.active) this.vehicles.exit()
+    if (placeAt) {
+      this.player.root.position.copy(placeAt)
+      resolvePlayerCollision(this.player.root.position, safeAnchor ?? this.world.spawn, this.world.colliders)
+    }
+    this.player.root.visible = true
+    this.heat.onVehicleChanged(null)
+    this.prevEngineStalled = false
+  }
+
+  protected currentSightingObservation() {
+    const active = this.vehicles.active
+    return {
+      masked: this.knowledge.masked,
+      outfit: this.knowledge.currentOutfit,
+      brandishedWeaponClass: this.holstered ? null : this.arsenal.current.category,
+      vehicle: active
+        ? {
+            model: active.name,
+            color: active.colorName,
+            plateNumber: active.plateNumber,
+            damageState: active.health > 82 ? 'Intact' : active.health > 45 ? 'Dented' : 'Wrecked',
+          }
+        : null,
+    }
+  }
+
+  protected currentWitnessObservation() {
+    const active = this.vehicles.active
+    return {
+      sawFace: !this.knowledge.masked,
+      outfitId: this.knowledge.currentOutfit.id,
+      weaponClass: this.holstered ? null : this.arsenal.current.category,
+      vehicleModel: active ? active.name : null,
+      vehicleColor: active ? active.colorName : null,
+      vehiclePlate: active ? active.plateNumber : null,
+    }
+  }
+
+  protected resolveCabDestination(dest: 'objective' | 'safehouse' | 'respray'): { target: THREE.Vector3; label: string } {
+    if (dest === 'safehouse') {
+      const home = this.world.safehouses[0]
+      return { target: new THREE.Vector3(home.position.x + 2, 0.2, home.position.z + 2), label: 'SAFEHOUSE' }
+    }
+    if (dest === 'respray') {
+      const bay = this.world.resprayBays[0]
+      return { target: new THREE.Vector3(bay.position.x, 0.2, bay.position.z + 2.5), label: "PAY 'N' SPRAY" }
+    }
+    if (this.missions.target) {
+      return { target: new THREE.Vector3(this.missions.target.x, 0.2, this.missions.target.z + 4), label: 'CONTRACT WAYPOINT' }
+    }
+    return { target: new THREE.Vector3(-8, 0.2, 2), label: 'DOWNTOWN STRIP' }
+  }
+
+  protected scanNearbyInteractables(pos: THREE.Vector3): NearbyInteractables {
+    const personalCar = this.vehicles.getPersonalVehicle()
+    return {
+      nearVehicle: this.vehicles.nearest(pos, 6),
+      bay: this.world.resprayBays.find(item => pos.distanceTo(item.position) < item.radius),
+      personalCar,
+      nearPersonalTrunk: !this.vehicles.active && Boolean(personalCar) && pos.distanceTo(this.vehicles.getTrunkPosition(personalCar!)) < 3.2,
+      storeWorld: this.storeWorld.findNearestInteractable(pos, 5.2),
+      amb: this.life.getServiceUnitState('ambulance', pos, 6),
+      cabNearby: !this.taxiRide && this.life.isCabNearby(pos, 7.5),
+      jacob: this.life.getServiceUnitState('arms_van', pos, 6.5),
+      gym: this.world.gyms.find(item => pos.distanceTo(item.position) < item.radius),
+      stand: this.world.foodStands.find(item => pos.distanceTo(item.position) < item.radius),
+      atIntroBeacon: !this.missions.current && Math.hypot(pos.x + 8, pos.z) < 7,
+      atSafehouse: this.world.safehouses.some(home => pos.distanceTo(home.position) < home.radius + 4),
+    }
+  }
+
+  protected buildInteractionPrompt(near: NearbyInteractables): { prompt: string; shortPrompt: string } {
+    if (this.taxiRide) {
+      return {
+        prompt: `CAB TO ${this.taxiRide.label}  ·  ENTER/SPACE SKIP (+$10)  ·  F EXIT`,
+        shortPrompt: '',
+      }
+    }
+    if (near.atSafehouse) return { prompt: 'E  SAFEHOUSE / WARDROBE / RESTOCK', shortPrompt: 'SAFEHOUSE' }
+    if (near.bay) return { prompt: `E  PAY 'N' SPRAY ($${near.bay.price})`, shortPrompt: `SPRAY $${near.bay.price}` }
+    if (near.nearPersonalTrunk && near.personalCar) {
+      return { prompt: `E  OPEN ${near.personalCar.name.toUpperCase()} TRUNK ARMORY`, shortPrompt: 'TRUNK ARMORY' }
+    }
+    if (near.storeWorld) {
+      return { prompt: `E  ENTER / SHOP / ROB ${near.storeWorld.store.spec.name.toUpperCase()}`, shortPrompt: 'ENTER STORE' }
+    }
+    if (near.amb) return { prompt: 'E  AMBULANCE HEAL (+100 HP)', shortPrompt: 'HEAL +100' }
+    if (near.cabNearby) return { prompt: 'E  HAIL YELLOW CAB', shortPrompt: 'HAIL CAB' }
+    if (near.jacob) return { prompt: 'E  LITTLE JACOB ARMS VAN', shortPrompt: 'JACOB VAN' }
+    if (near.gym) return { prompt: `E  WORK OUT (${near.gym.name.toUpperCase()})`, shortPrompt: 'WORK OUT' }
+    if (near.stand) return { prompt: `E  EAT AT ${near.stand.name.toUpperCase()} ($${near.stand.price})`, shortPrompt: `EAT $${near.stand.price}` }
+    if (near.atIntroBeacon) return { prompt: 'E  START FIRST CONTRACT', shortPrompt: 'CONTRACT' }
+
+    const active = this.vehicles.active
+    const prompt = active
+      ? (Math.abs(active.speed) > 12 ? 'F  HIGH-SPEED BAILOUT' : 'F  EXIT VEHICLE')
+      : near.nearVehicle ? `F  ENTER ${near.nearVehicle.name.toUpperCase()}` : ''
+    return { prompt, shortPrompt: '' }
+  }
+}
+
+export class ViceGame extends ViceSessionBase {
   readonly ui: GameHud
   readonly touchControls: TouchControls
-  mode: Mode = 'title'
-  private yaw = 0
-  private pitch = .2
-  private elapsed = 0
-  private readonly robbedStores: Set<string>
   private shotCooldown = 0
   private hitCooldown = 0
   private rampCooldown = 0
@@ -69,23 +405,18 @@ export class ViceGame {
   private saveTimer = 0
   private weaponHotTimer = 0
   private aimingRightMouse = false
-  private wheelOpen = false
-  private wheelPinned = false
-  private statsOpen = false
-  private phoneOpen = false
-  private holstered = false
   private prevPadLabel = ''
-  private playerArmor = 0
   private grittyFilter = true
-  private ringtone: PhoneRingtone = 'classic'
   private latestPhoto: string | null = null
   private photoCount = 0
   private capturePhotoNextRender = false
+  private softwareGlRenderAccum = 1
   private crankSoundCooldown = 0
-  private prevEngineStalled = false
-  private currentTimeLabel = '16:13'
-  private taxiRide: { dest: 'objective' | 'safehouse' | 'respray'; target: THREE.Vector3; label: string; cabPos: THREE.Vector3; cabHeading: number } | null = null
-  private lastHailedCabPos: THREE.Vector3 | null = null
+  private fuelNoticeCooldown = 0
+  private focusGauge = 100
+  private focusActive = false
+  private activeStoreCategory = 'all'
+  private customWaypoint: THREE.Vector3 | null = null
   private lastSavedPos = new THREE.Vector3()
   private lastSavedWanted = 0
   private lastSavedWeapon = 'pistol'
@@ -101,18 +432,21 @@ export class ViceGame {
   private objectiveBeacon: THREE.Group
   private readonly board = new OnlineLeaderboard(message => this.ui.toast(message))
   private currentUser: User | null = null
+  private peakWanted = 0
+  private turfIncomeAccum = 0
+  private readonly onOnline = () => {
+    if (this.currentUser) {
+      void flushPendingCloudSync(this.currentUser, this.save).then(res => {
+        if (res.flushed) this.ui.toast('OFFLINE SAVE SYNCED TO CLOUD')
+      })
+    }
+  }
 
-  constructor(private readonly renderer: Renderer, private readonly input: Input, private readonly audio: ViceAudio, root: HTMLElement) {
-    this.renderer.attachEnvironment(this.world.scene)
-    this.vehicles.setWorldGeometry(this.world.colliders, this.world.ramps)
-    this.life.setWorldColliders(this.world.colliders)
-    this.turf.setWorldColliders(this.world.colliders)
-    this.cutscenes = new CutsceneDirector(this.world.scene, this.audio)
-
+  constructor(renderer: Renderer, input: Input, audio: ViceAudio, root: HTMLElement) {
+    super(renderer, input, audio)
     this.world.scene.add(this.player.root)
     this.muzzleFlash.visible = false; this.world.scene.add(this.muzzleFlash)
     this.applySavedPlayerState()
-    this.robbedStores = new Set(this.save.robbedStores)
     this.audio.muted = this.save.muted
     this.camera.position.set(this.player.root.position.x, this.player.root.position.y + 7, this.player.root.position.z + 12)
     this.objectiveBeacon = new THREE.Group()
@@ -140,38 +474,28 @@ export class ViceGame {
         this.ui.setTouchModeLabel(pref)
         this.ui.toast(`Touch Controls: ${pref.toUpperCase()}`)
       },
+      onDrawerAction: actionId => this.handleDrawerAction(actionId),
+      onCloseDrawer: () => this.closeDrawer(),
+      onSelectMapFilter: cat => { this.activeStoreCategory = cat },
+      switchProtagonist: () => this.switchProtagonist(),
       combat: {
         selectSector: (idx, cycle) => {
           const w = this.arsenal.selectSector(idx, cycle)
-          this.holstered = false
-          this.player.setHolstered(false)
-          this.syncWeaponVisual()
-          if (this.wheelPinned && !cycle) {
-            this.wheelPinned = false
-            this.wheelOpen = false
-          }
-          this.ui.toast(`EQUIPPED: ${w.name.toUpperCase()}`)
+          this.equipWeaponSpec(w, `EQUIPPED: ${w.name.toUpperCase()}`, !cycle && this.wheelPinned)
         },
         selectWeapon: id => {
           const w = this.arsenal.selectWeapon(id)
-          this.holstered = false
-          this.player.setHolstered(false)
-          this.syncWeaponVisual()
-          if (this.wheelPinned) {
-            this.wheelPinned = false
-            this.wheelOpen = false
-          }
-          this.ui.toast(`EQUIPPED: ${w.name.toUpperCase()}`)
+          this.equipWeaponSpec(w, `EQUIPPED: ${w.name.toUpperCase()}`, this.wheelPinned)
         },
         toggleAttachment: att => this.toggleWeaponAttachment(att),
         closeWheel: () => {
-          this.wheelOpen = false
-          this.wheelPinned = false
-          if (this.mode === 'playing' && !this.phoneOpen) this.input.lockPointer()
+          this.closeOverlays({ keepPhone: true, keepDrawer: true })
+          this.syncPointerLock()
         },
         closeStats: () => {
           this.statsOpen = false
         },
+        switchProtagonist: () => this.switchProtagonist(),
       },
       phone: {
         onKeyBeep: () => this.audio.phoneTone('beep'),
@@ -180,6 +504,11 @@ export class ViceGame {
         onRideCab: dest => this.handlePhoneRideCab(dest),
         onSkipRide: dest => this.handlePhoneSkipRide(dest),
         onCallJacob: order => this.handlePhoneJacob(order),
+        onSocialEvent: evId => this.handleSocialEvent(evId),
+        onDepositBank: () => this.handlePhoneDepositBank(),
+        onWithdrawBank: () => this.handlePhoneWithdrawBank(),
+        onRequestPersonalCar: () => this.deliverPersonalVehicle(),
+        onSwitchProtagonist: () => this.switchProtagonist(),
         onTakePhoto: () => {
           this.capturePhotoNextRender = true
           this.audio.phoneTone('shutter')
@@ -215,38 +544,12 @@ export class ViceGame {
         this.toggleVehicle()
       },
       onTogglePhone: () => this.togglePhone(),
-      onToggleCover: () => {
-        if (this.mode !== 'playing' || this.vehicles.active) return
-        const carCoords = this.vehicles.vehicles.map(v => ({
-          x: v.root.position.x,
-          z: v.root.position.z,
-          heading: v.heading,
-          halfWidth: 1.05,
-        }))
-        const inCover = this.player.toggleCover(this.world.colliders, carCoords)
-        if (inCover) {
-          this.ui.toast(this.player.cover.coverBehindCar ? 'COVER BEHIND CAR' : 'IN COVER')
-        }
-      },
-      onToggleMask: () => {
-        if (this.mode !== 'playing') return
-        const masked = this.knowledge.toggleMask()
-        this.player.setMasked(masked)
-        this.ui.toast(masked ? 'BANDANA MASK ON' : 'BANDANA MASK OFF')
-      },
+      onToggleCover: () => this.togglePlayerCover(false),
+      onToggleMask: () => this.toggleBandanaMask(false),
       onToggleStats: () => {
         if (this.mode === 'playing') this.statsOpen = !this.statsOpen
       },
-      onRecruit: () => {
-        if (this.mode !== 'playing') return
-        const res = this.turf.recruitNearby(this.player.root.position, this.rpg.maxHomies)
-        if (res.recruitedNow > 0) {
-          this.audio.recruitWhistle()
-          this.ui.toast(`RECRUITED ${res.recruitedNow} HOMIE${res.recruitedNow > 1 ? 'S' : ''}`)
-        } else {
-          this.ui.toast(res.atCap ? 'SQUAD AT MAX CAPACITY' : 'NO ALLIED CREW NEARBY')
-        }
-      },
+      onRecruit: () => this.recruitCrewOrPartner(false),
       onSkipTaxi: () => {
         if (this.taxiRide) this.handlePhoneSkipRide(this.taxiRide.dest, true)
       },
@@ -264,6 +567,7 @@ export class ViceGame {
         && !this.input.isTouchDevice
         && !this.wheelOpen
         && !this.phoneOpen
+        && !this.drawer
       ) {
         this.lockLostAt = performance.now()
         this.pause()
@@ -271,6 +575,31 @@ export class ViceGame {
     })
     window.addEventListener('keydown', e => {
       if (this.mode !== 'playing') return
+      if (this.drawer) {
+        if (e.code === 'Escape') { e.preventDefault(); this.closeDrawer(); return }
+        if (e.code >= 'Digit1' && e.code <= 'Digit6') {
+          const idx = Number(e.code.slice(5)) - 1
+          const act = this.drawer.actions[idx]
+          if (act && !act.disabled) { e.preventDefault(); this.handleDrawerAction(act.id) }
+          return
+        }
+      }
+      if (e.code === 'KeyK') {
+        e.preventDefault()
+        this.switchProtagonist()
+        return
+      }
+      if (e.code === 'KeyN' && !this.phoneOpen && !this.wheelOpen) {
+        e.preventDefault()
+        this.openNpcDialogueDrawer()
+        return
+      }
+      if (e.code === 'KeyU' && !this.phoneOpen && !this.wheelOpen) {
+        e.preventDefault()
+        this.focusActive = !this.focusActive && this.focusGauge > 5
+        this.ui.toast(this.focusActive ? 'TACTICAL FOCUS SLOW-MO ENGAGED' : 'FOCUS NORMAL')
+        return
+      }
       if (this.phoneOpen) {
         if (e.code === 'ArrowUp') { e.preventDefault(); this.ui.phone.moveSelection(-1); return }
         if (e.code === 'ArrowDown') { e.preventDefault(); this.ui.phone.moveSelection(1); return }
@@ -289,10 +618,7 @@ export class ViceGame {
       if (e.code >= 'Digit1' && e.code <= 'Digit8') {
         const idx = Number(e.code.slice(5)) - 1
         const w = this.arsenal.selectSector(idx, this.arsenal.current.sectorIndex === idx)
-        this.holstered = false
-        this.player.setHolstered(false)
-        this.syncWeaponVisual()
-        this.ui.toast(`${w.shortName}`)
+        this.equipWeaponSpec(w, w.shortName)
       }
     })
     window.addEventListener('mousedown', e => { if (e.button === 2 && this.mode === 'playing') this.aimingRightMouse = true })
@@ -300,28 +626,11 @@ export class ViceGame {
     window.addEventListener('contextmenu', e => { if (this.mode === 'playing') e.preventDefault() })
     window.addEventListener('blur', () => {
       this.aimingRightMouse = false
-      this.wheelOpen = false
-      this.wheelPinned = false
-      this.phoneOpen = false
+      this.closeOverlays({ keepDrawer: true })
       this.touchControls.releaseAll()
       if (this.mode === 'playing') this.pause()
     })
-  }
-
-  private setPhoneOpen(open: boolean): void {
-    if (this.mode !== 'playing' && open) return
-    this.phoneOpen = open
-    if (open) {
-      this.wheelOpen = false
-      this.input.unlockPointer()
-    } else if (this.mode === 'playing') {
-      this.input.lockPointer()
-    }
-  }
-
-  private togglePhone(): void {
-    this.setPhoneOpen(!this.phoneOpen)
-    if (this.phoneOpen && this.ringtone !== 'silent') this.audio.phoneTone('beep')
+    window.addEventListener('online', this.onOnline)
   }
 
   private handlePhone911(service: 'ambulance' | 'fire' | 'police'): void {
@@ -346,21 +655,6 @@ export class ViceGame {
     this.life.summonServiceVehicle('taxi', this.player.root.position)
     this.ui.phone.addSms('ROMAN CAB', 'Cab is pulling up to the nearest curb! Walk near & press E.', this.currentTimeLabel)
     this.ui.toast("ROMAN CAB DISPATCHED — PRESS [E] NEAR CAB OR USE 'SKIP RIDE'")
-  }
-
-  private resolveCabDestination(dest: 'objective' | 'safehouse' | 'respray'): { target: THREE.Vector3; label: string } {
-    if (dest === 'safehouse') {
-      const home = this.world.safehouses[0]
-      return { target: new THREE.Vector3(home.position.x + 2, 0.2, home.position.z + 2), label: 'SAFEHOUSE' }
-    }
-    if (dest === 'respray') {
-      const bay = this.world.resprayBays[0]
-      return { target: new THREE.Vector3(bay.position.x, 0.2, bay.position.z + 2.5), label: "PAY 'N' SPRAY" }
-    }
-    if (this.missions.target) {
-      return { target: new THREE.Vector3(this.missions.target.x, 0.2, this.missions.target.z + 4), label: 'CONTRACT WAYPOINT' }
-    }
-    return { target: new THREE.Vector3(-8, 0.2, 2), label: 'DOWNTOWN STRIP' }
   }
 
   private handlePhoneRideCab(dest: 'objective' | 'safehouse' | 'respray'): void {
@@ -399,14 +693,8 @@ export class ViceGame {
     this.taxiRide = null
     this.lastHailedCabPos = null
     this.life.consumeServiceUnit('taxi')
-    const p = this.player.root.position
-    if (this.vehicles.active) {
-      this.vehicles.exit()
-    }
     const { target, label } = this.resolveCabDestination(dest)
-    p.copy(target)
-    this.player.root.visible = true
-    resolvePlayerCollision(p, this.world.spawn, this.world.colliders)
+    this.clearActiveRide(target, this.world.spawn)
     this.player.velocity.set(0, 0, 0)
     this.setPhoneOpen(false)
     this.ui.toast(`ROMAN CAB: ARRIVED AT ${label} (-$${cost})`)
@@ -437,13 +725,7 @@ export class ViceGame {
       return
     }
     this.save.money -= 120
-    this.arsenal.addAmmo('handgun', 60)
-    this.arsenal.addAmmo('smg', 120)
-    this.arsenal.addAmmo('shotgun', 24)
-    this.arsenal.addAmmo('rifle', 90)
-    this.arsenal.addAmmo('precision', 20)
-    this.arsenal.addAmmo('heavy', 4)
-    this.arsenal.addAmmo('throwable', 4)
+    this.restockAllAmmo('full')
     this.audio.reload()
     this.ui.toast('LITTLE JACOB: ALL AMMO RESTOCKED (-$120)')
     this.persist()
@@ -476,6 +758,15 @@ export class ViceGame {
       this.heat.restoreFromSave(this.save.heat)
     }
     this.player.setPhysique(this.rpg.muscle, this.rpg.fat)
+    const lead: ProtagonistId = this.save.protagonist === 'lucia' ? 'lucia' : 'jason'
+    this.save.protagonist = lead
+    this.save.bankBalance = this.save.bankBalance ?? 2500
+    this.save.uncleanedLoot = this.save.uncleanedLoot ?? 0
+    this.save.partnerBond = this.save.partnerBond ?? 32
+    this.save.conductScore = this.save.conductScore ?? 0
+    this.save.fuelEnabled = this.save.fuelEnabled !== false
+    this.player.setProtagonistAppearance(lead, this.save.hairstyle)
+    this.partner.syncIdentity(lead)
     this.syncWeaponVisual()
     this.lastSavedPos.copy(this.player.root.position)
     this.lastSavedWanted = this.heat.wanted
@@ -483,26 +774,400 @@ export class ViceGame {
     this.lastSavedAmmo = this.arsenal.getAmmoDisplay().total
   }
 
-  private syncWeaponVisual(): void {
-    const spec = this.arsenal.current
-    this.player.setWeaponVisual(
-      spec.category,
-      spec.id,
-      this.arsenal.hasAttachment(spec.id, 'suppressor'),
-      this.arsenal.lastLongGunId,
-    )
+  private switchProtagonist(): void {
+    const next: ProtagonistId = this.save.protagonist === 'jason' ? 'lucia' : 'jason'
+    this.save.protagonist = next
+    this.player.setProtagonistAppearance(next, this.save.hairstyle)
+    this.partner.syncIdentity(next)
+    this.audio.phoneTone('beep')
+    this.ui.toast(`SWITCHED LEAD TO ${next.toUpperCase()} · BOND ${Math.round(this.save.partnerBond ?? 32)}%`)
+    this.persist(false)
   }
 
-  private toggleWeaponAttachment(att: AttachmentId): void {
-    const spec = this.arsenal.current
-    if (!spec.supportsAttachments.includes(att)) {
-      this.ui.toast(`${spec.shortName} has no ${att} slot`)
+  private handleSocialEvent(evId: string): void {
+    const map: Record<string, { x: number; z: number; label: string }> = {
+      race: { x: 45, z: -120, label: 'Midnight Beach Sprint' },
+      truck: { x: -70, z: -116, label: 'Fleeca Armored Van' },
+      cargo: { x: 61, z: 161, label: 'Port Quay Cargo Drop' },
+    }
+    const target = map[evId]
+    if (!target) return
+    this.customWaypoint = new THREE.Vector3(target.x, 0, target.z)
+    this.setPhoneOpen(false)
+    this.ui.toast(`GPS WAYPOINT SET: ${target.label.toUpperCase()}`)
+  }
+
+  private handlePhoneDepositBank(): void {
+    const moved = depositCashToBank(this.save as { money: number; bankBalance: number })
+    if (moved <= 0) {
+      this.ui.toast('No cash on hand to deposit')
       return
     }
-    const enabled = this.arsenal.toggleAttachment(att)
-    this.syncWeaponVisual()
-    this.ui.toast(`${spec.shortName}: ${att.toUpperCase()} ${enabled ? 'EQUIPPED' : 'REMOVED'}`)
-    this.persist(false)
+    this.audio.phoneTone('beep')
+    this.ui.toast(`BUCKME BANK: DEPOSITED $${moved.toLocaleString()} (PROTECTED)`)
+    this.persist()
+  }
+
+  private handlePhoneWithdrawBank(): void {
+    const bank = this.save.bankBalance ?? 0
+    const amt = Math.min(500, bank)
+    if (amt <= 0) {
+      this.ui.toast('Bank balance empty')
+      return
+    }
+    this.save.bankBalance = bank - amt
+    this.save.money += amt
+    this.audio.phoneTone('beep')
+    this.ui.toast(`BUCKME BANK: WITHDREW $${amt.toLocaleString()}`)
+    this.persist()
+  }
+
+  private deliverPersonalVehicle(): void {
+    const personal = this.vehicles.getPersonalVehicle()
+    if (!personal) {
+      this.ui.toast('No Personal Vehicle available')
+      return
+    }
+    const p = this.player.root.position
+    const streetX = Math.abs(p.x) < 35 ? (p.x >= 0 ? 7.2 : -7.2) : THREE.MathUtils.clamp(p.x + 3.5, -280, 45)
+    personal.root.position.set(streetX, 0, THREE.MathUtils.clamp(p.z + 4.5, -360, 360))
+    personal.velocity.set(0, 0, 0)
+    personal.speed = 0
+    personal.health = 100
+    this.vehicles.refuel(personal)
+    this.setPhoneOpen(false)
+    this.audio.phoneTone('respray')
+    this.ui.toast(`MECHANIC DELIVERED ${personal.name.toUpperCase()} TO CURB`)
+  }
+
+  private openStoreDrawer(storeId: string): void {
+    const spec = getStoreById(storeId)
+    const runtime = this.storeWorld.states.find(s => s.spec.id === storeId)
+    if (!spec || !runtime) return
+    this.activeStoreId = storeId
+    this.closeOverlays({ keepDrawer: true })
+    this.syncPointerLock()
+
+    const turfBenefits = this.turf.getAlliedBenefits()
+    const discountMult = 1 - turfBenefits.storeDiscountPct / 100
+    const storeStatus = getStoreStatus(runtime)
+    const cooldownSec = getCooldownRemaining(runtime)
+
+    const actions: HudDrawerState['actions'] = spec.items.map(item => {
+      const price = item.price > 0 ? Math.max(1, Math.round(item.price * discountMult)) : 0
+      return {
+        id: `buy:${item.id}`,
+        label: item.label,
+        detail: item.detail,
+        badge: price > 0 ? `$${price}` : 'FREE',
+        disabled: price > this.save.money,
+      }
+    })
+    if (!runtime.registerRobbed && cooldownSec <= 0) {
+      actions.push({
+        id: 'holdup:start',
+        label: 'Hold Up Store (Draw & Rob Register)',
+        detail: spec.hasGuard ? 'Armed guard inside — maintain high intimidation!' : 'Aim weapon or let partner cover hostages',
+        badge: `+$${spec.registerReward}`,
+      })
+    }
+    if (!runtime.safeCracked && cooldownSec <= 0) {
+      actions.push({
+        id: 'holdup:safe',
+        label: 'Crack Back-Room Safe',
+        detail: 'Drops high-value uncleaned loot (fence at Pawn/Jewelers)',
+        badge: `+$${spec.safeLoot} LOOT`,
+      })
+    }
+
+    const statusLabel = storeStatus === 'robbed_cooldown'
+      ? `LOCKED (${cooldownSec}s)`
+      : storeStatus === 'holdup_active'
+        ? 'HOLDUP ACTIVE'
+        : storeStatus === 'alarm_locked'
+          ? 'ALARM LOCKED'
+          : 'OPEN'
+    const perkLabel = turfBenefits.storeDiscountPct > 0 ? ` · CREW -${turfBenefits.storeDiscountPct}%` : ''
+
+    this.drawer = {
+      kind: 'store',
+      title: spec.name.toUpperCase(),
+      subtitle: `${STORE_CATEGORY_LABELS[spec.category]} · ${statusLabel}${perkLabel}`,
+      hint: 'CLICK OR PRESS [1–6] · [ESC] CLOSE · SHOOT RED CCTV TO KILL SILENT ALARM',
+      actions,
+    }
+  }
+
+  private openTrunkDrawer(): void {
+    const personal = this.vehicles.getPersonalVehicle()
+    if (!personal) return
+    this.closeOverlays({ keepDrawer: true })
+    this.syncPointerLock()
+    const trunkList = this.save.trunkWeapons ?? personal.trunkWeapons
+    const actions: HudDrawerState['actions'] = trunkList.map(wId => {
+      const wSpec = WEAPON_CATALOG.find(w => w.id === wId)
+      const capLabel = wSpec && isHandgunWeapon(wSpec.category)
+        ? `Handgun (cap ${LOADOUT_LIMITS.maxHandguns})`
+        : wSpec && isLongGunWeapon(wSpec.category)
+          ? `Long Gun (cap ${LOADOUT_LIMITS.maxLongGuns})`
+          : 'Tactical'
+      return {
+        id: `trunk:equip:${wId}`,
+        label: `Equip ${wSpec?.name ?? wId} from Trunk`,
+        detail: `Stows current weapon into trunk · ${capLabel}`,
+        badge: this.arsenal.equippedId === wId ? 'EQUIPPED' : 'SWAP',
+      }
+    })
+    actions.push({
+      id: 'trunk:armor',
+      label: 'Equip Spare Trunk Kevlar Vest',
+      detail: 'Restores +50 Body Armor from vehicle storage',
+      badge: 'FREE',
+    })
+    actions.push({
+      id: 'trunk:outfit',
+      label: 'Swap Trunk Disguise Outfit',
+      detail: 'Clears police Outfit APB without visiting safehouse',
+      badge: 'STEALTH',
+    })
+    this.drawer = {
+      kind: 'trunk',
+      title: `${personal.name.toUpperCase()} TRUNK ARMORY`,
+      subtitle: 'PERSONAL VEHICLE STORAGE · REALISTIC CARRY CAP',
+      hint: 'MAX CARRY: 2 HANDGUNS + 2 LONG GUNS · CLICK OR [1–6] TO SWAP · [ESC] CLOSE',
+      actions,
+    }
+  }
+
+  private openNpcDialogueDrawer(): void {
+    const civ = this.life.findNearestCivilian(this.player.root.position, 4.8)
+    if (!civ) {
+      this.ui.toast('Walk closer to a pedestrian to interact [N]')
+      return
+    }
+    this.activeDialogueNpcId = civ.id
+    this.activeDialogueWitness = civ.witnessActive
+    this.closeOverlays({ keepDrawer: true })
+    this.syncPointerLock()
+    this.drawer = {
+      kind: 'dialogue',
+      title: civ.witnessActive ? 'WITNESS INTERACTION (911 CALL!)' : 'STREET NPC INTERACTION',
+      subtitle: 'GTA 6 REACTIVE 4-TONE DIALOGUE',
+      hint: 'CLICK OR PRESS [1–4] · [ESC] CLOSE',
+      actions: [
+        { id: 'dlg:greet', label: 'Greet', detail: 'Friendly small talk (+Professional)', badge: '+1' },
+        { id: 'dlg:antagonize', label: 'Antagonize', detail: 'Provoke bystander (may provoke fight/911)', badge: '-4' },
+        { id: 'dlg:threaten', label: 'Threaten / Rob', detail: 'Intimidate for street cash & cancel 911', badge: 'CASH' },
+        { id: 'dlg:defuse', label: 'Defuse', detail: 'Calm witness / talk down 911 alert', badge: 'CALM' },
+      ],
+    }
+  }
+
+  private handleDrawerAction(actionId: string): void {
+    if (actionId.startsWith('dlg:')) {
+      const tone = actionId.slice(4) as NpcDialogueTone
+      const res = resolveNpcDialogue(tone, {
+        masked: this.knowledge.masked,
+        armed: !this.holstered && this.arsenal.current.fireMode !== 'melee',
+        conductScore: this.save.conductScore ?? 0,
+        witnessActive: this.activeDialogueWitness,
+      })
+      this.save.conductScore = THREE.MathUtils.clamp((this.save.conductScore ?? 0) + res.conductDelta, -100, 100)
+      if (res.cashGained > 0) this.save.money += res.cashGained
+      if (this.activeDialogueNpcId) {
+        this.life.applyDialogueReaction(this.activeDialogueNpcId, {
+          cancelledWitness: res.cancelledWitness,
+          startedWitness: res.startedWitness,
+          flee: tone === 'threaten' || tone === 'antagonize',
+          origin: this.player.root.position,
+        })
+      }
+      if (tone === 'threaten') this.reportCrime(this.player.root.position, 1)
+      this.ui.toast(`${res.npcLine} (${res.callout})`)
+      this.closeDrawer()
+      this.persist(false)
+      return
+    }
+
+    if (actionId.startsWith('trunk:')) {
+      if (actionId === 'trunk:armor') {
+        this.playerArmor = Math.min(100, this.playerArmor + 50)
+        this.audio.reload()
+        this.ui.toast('TRUNK ARMOR EQUIPPED (+50 AP)')
+        this.closeDrawer()
+        return
+      }
+      if (actionId === 'trunk:outfit') {
+        const { outfit } = this.swapDisguiseOutfit()
+        this.ui.toast(`TRUNK DISGUISE: ${outfit.label} (APB CLEARED)`)
+        this.closeDrawer()
+        return
+      }
+      if (actionId.startsWith('trunk:equip:')) {
+        const nextId = actionId.slice('trunk:equip:'.length)
+        const prevId = this.arsenal.equippedId
+        const trunkList = [...(this.save.trunkWeapons ?? ['carbine', 'pump_shotgun'])]
+        const idx = trunkList.indexOf(nextId)
+        if (idx >= 0 && prevId !== nextId) trunkList[idx] = prevId
+        this.save.trunkWeapons = trunkList
+        const equipped = this.arsenal.selectWeapon(nextId)
+        this.equipWeaponSpec(equipped, `TRUNK SWAP: EQUIPPED ${this.arsenal.current.shortName}`)
+        this.audio.reload()
+        this.closeDrawer()
+        this.persist(false)
+        return
+      }
+    }
+
+    if (!this.activeStoreId) return
+    const spec = getStoreById(this.activeStoreId)
+    const runtime = this.storeWorld.states.find(s => s.spec.id === this.activeStoreId)
+    if (!spec || !runtime) return
+
+    if (actionId === 'holdup:start') {
+      this.holstered = false
+      this.player.setHolstered(false)
+      this.storeWorld.startHoldup(runtime)
+      this.audio.dispatchAlert()
+      this.closeDrawer()
+      this.ui.toast(`HOLDUP STARTED AT ${spec.name.toUpperCase()} — SHOOT RED CCTV OR KEEP AIMED!`)
+      return
+    }
+    if (actionId === 'holdup:safe') {
+      const bond = bondBonusMultipliers(this.save.partnerBond ?? 32)
+      const res = this.storeWorld.triggerSafeCrackStep(runtime, 4, 1 + bond.robberySpeedBoost)
+      if (res.crackedNow) {
+        this.save.uncleanedLoot = (this.save.uncleanedLoot ?? 0) + res.loot
+        this.save.conductScore = THREE.MathUtils.clamp((this.save.conductScore ?? 0) - 5, -100, 100)
+        this.rpg.recordRobbery(res.loot, !runtime.alarmTriggered)
+        this.hotZones.addZone({
+          id: spec.id,
+          label: spec.name,
+          x: spec.x,
+          z: spec.z,
+          loggedOutfitId: this.knowledge.currentOutfit.id,
+          loggedPlate: this.vehicles.active?.plateNumber ?? null,
+        })
+        this.audio.robbery()
+        this.reportCrime(runtime.worldCenter, 2, { immediate: true, escalateIfEqual: true })
+        this.ui.toast(`SAFE CRACKED! +$${res.loot.toLocaleString()} UNCLEANED LOOT (FENCE AT PAWN/JEWELERS)`)
+      } else {
+        this.ui.toast(`SAFE DRILL ${Math.round(runtime.safeProgress * 100)}% — PRESS AGAIN TO FINISH`)
+      }
+      this.closeDrawer()
+      this.persist()
+      return
+    }
+    if (actionId.startsWith('buy:')) {
+      const itemId = actionId.slice(4)
+      const item = spec.items.find(i => i.id === itemId)
+      if (item) this.purchaseStoreItem(spec.name, item)
+      this.openStoreDrawer(spec.id)
+    }
+  }
+
+  private purchaseStoreItem(storeName: string, item: StoreMenuItem): void {
+    const discountPct = this.turf.getAlliedBenefits().storeDiscountPct
+    const finalPrice = item.price > 0 ? Math.max(1, Math.round(item.price * (1 - discountPct / 100))) : 0
+    if (finalPrice > this.save.money) {
+      this.ui.toast(`${storeName}: Need $${finalPrice}`)
+      return
+    }
+    const act = item.action
+    if (act.type === 'deposit_all') {
+      this.handlePhoneDepositBank()
+      return
+    }
+    if (act.type === 'withdraw_500') {
+      this.handlePhoneWithdrawBank()
+      return
+    }
+    if (act.type === 'fence_loot') {
+      const res = fenceUncleanedLoot(this.save as { money: number; uncleanedLoot: number })
+      if (res.cleanPayout <= 0) {
+        this.ui.toast('No Uncleaned Loot to fence — rob safes or glass display cases!')
+      } else {
+        this.audio.robbery()
+        this.ui.toast(`FENCED $${res.fencedGross.toLocaleString()} LOOT -> +$${res.cleanPayout.toLocaleString()} CLEAN CASH (85%)`)
+        this.persist()
+      }
+      return
+    }
+
+    this.save.money -= finalPrice
+    this.save.conductScore = THREE.MathUtils.clamp((this.save.conductScore ?? 0) + 1, -100, 100)
+    if (act.type === 'heal') {
+      this.save.health = Math.min(100, this.save.health + act.hp)
+      this.rpg.eatMeal(act.hunger)
+      if (act.focus) this.focusGauge = Math.min(100, this.focusGauge + act.focus)
+      if (act.stamina) { this.rpg.stamina = 100; this.rpg.exhausted = false }
+      this.audio.phoneTone('hotdog')
+      this.ui.toast(`${item.label}: +${act.hp} HP & +${act.hunger} HUNGER`)
+    } else if (act.type === 'armor') {
+      this.playerArmor = Math.min(100, Math.max(this.playerArmor, act.amount))
+      this.audio.reload()
+      this.ui.toast(`${item.label}: ${Math.round(this.playerArmor)} BODY ARMOR`)
+    } else if (act.type === 'ammo') {
+      this.arsenal.addAmmo(act.category, act.amount)
+      this.arsenal.addAmmo('handgun', 60)
+      this.audio.reload()
+      this.ui.toast(`RESTOCKED ${item.label}`)
+    } else if (act.type === 'weapon') {
+      const equipped = this.arsenal.selectWeapon(act.weaponId)
+      this.equipWeaponSpec(equipped, `EQUIPPED ${item.label.toUpperCase()}`)
+      this.audio.reload()
+    } else if (act.type === 'attachment') {
+      this.toggleWeaponAttachment(act.attachmentId)
+    } else if (act.type === 'mask') {
+      this.toggleBandanaMask(false)
+    } else if (act.type === 'outfit') {
+      const { outfit } = this.swapDisguiseOutfit()
+      if (item.id === 'gift-watch') {
+        this.save.partnerBond = Math.min(100, (this.save.partnerBond ?? 32) + 10)
+      }
+      this.ui.toast(`EQUIPPED ${outfit.label.toUpperCase()} — OUTFIT APB CLEARED`)
+    } else if (act.type === 'hair') {
+      this.save.hairstyle = act.style
+      this.player.setProtagonistAppearance(this.save.protagonist === 'lucia' ? 'lucia' : 'jason', act.style)
+      this.ui.toast(`HAIRCUT: ${act.style.toUpperCase()}`)
+    } else if (act.type === 'tattoo') {
+      const tats = new Set(this.save.tattoos ?? [])
+      tats.add(act.label)
+      this.save.tattoos = [...tats]
+      this.rpg.respect = Math.min(100, this.rpg.respect + 4)
+      this.ui.toast(`NEW INK: ${act.label} (+HOLDP INTIMIDATION & RESPECT)`)
+    } else if (act.type === 'gym') {
+      const gain = this.rpg.recordGymRep(act.kind)
+      this.player.setPhysique(this.rpg.muscle, this.rpg.fat)
+      this.audio.gymRep()
+      this.ui.toast(`GYM: +${gain.muscleGain} MUSCLE · +${gain.staminaGain} STAMINA`)
+    } else if (act.type === 'respray' || act.type === 'strip_tracker' || act.type === 'claim_personal' || act.type === 'refuel') {
+      const target = this.vehicles.active ?? this.vehicles.nearest(this.player.root.position, 14) ?? this.vehicles.getPersonalVehicle()
+      if (!target) {
+        this.ui.toast('Park a vehicle nearby to service it')
+        this.save.money += finalPrice
+        return
+      }
+      if (act.type === 'respray') {
+        const info = this.vehicles.respray(target)
+        this.heat.onVehicleChanged(target)
+        this.audio.phoneTone('respray')
+        this.ui.toast(`RESPRAYED & NEW PLATE [${info.plateNumber}]`)
+      } else if (act.type === 'strip_tracker') {
+        this.vehicles.stripTracker(target)
+        this.audio.phoneTone('respray')
+        this.ui.toast(`GPS TRACKER STRIPPED FROM ${target.name.toUpperCase()}!`)
+      } else if (act.type === 'claim_personal') {
+        this.vehicles.setPersonalVehicle(target)
+        this.audio.phoneTone('beep')
+        this.ui.toast(`${target.name.toUpperCase()} REGISTERED AS PERSONAL VEHICLE!`)
+      } else {
+        this.vehicles.refuel(target)
+        this.audio.phoneTone('beep')
+        this.ui.toast(`${target.name.toUpperCase()} REFUELED / CHARGED TO 100%`)
+      }
+    }
+    this.persist()
   }
 
   get wanted(): number {
@@ -538,6 +1203,7 @@ export class ViceGame {
         this.applySavedPlayerState()
         for (const s of this.save.robbedStores) this.robbedStores.add(s)
         saveCityProgress(this.save)
+        void flushPendingCloudSync(user, this.save)
         this.ui.toast(`Cloud save synced for ${label}`)
       } else {
         this.persist()
@@ -570,7 +1236,7 @@ export class ViceGame {
     }
   }
 
-  private persist(syncCloud = true): void {
+  persist(syncCloud = true): void {
     const state = this.capturePlayerState()
     this.save.position = state.position
     this.save.inventory = state.inventory
@@ -627,13 +1293,12 @@ export class ViceGame {
 
   private startCutscene(id: CutsceneId, focus?: THREE.Vector3, endToast?: string, missionTitle = ''): void {
     this.mode = 'cutscene'
-    this.wheelOpen = false
-    this.wheelPinned = false
+    this.closeOverlays({ keepDrawer: true })
     this.cutsceneSkipGuard = 0.35
     this.cutsceneWeather = undefined
     this.pendingMissionTitle = missionTitle
     this.player.root.visible = false
-    this.input.unlockPointer()
+    this.syncPointerLock()
     this.ui.showCutscene()
     this.cutscenes.start(id, focus, () => this.finishCutscene(endToast))
   }
@@ -648,7 +1313,7 @@ export class ViceGame {
     this.player.root.visible = !this.vehicles.active
     this.mode = 'playing'
     this.ui.showGame()
-    this.input.lockPointer()
+    this.syncPointerLock()
     if (this.pendingMissionTitle) {
       playMissionCard(this.pendingMissionTitle)
       this.pendingMissionTitle = ''
@@ -657,30 +1322,43 @@ export class ViceGame {
   }
 
   private resume(): void {
-    this.audio.unlock(); this.wheelOpen = false; this.wheelPinned = false; this.phoneOpen = false; this.mode = 'playing'; this.ui.showGame(); this.input.lockPointer()
+    this.audio.unlock()
+    this.closeOverlays({ keepDrawer: true })
+    this.mode = 'playing'
+    this.ui.showGame()
+    this.syncPointerLock()
   }
 
   private pause(): void {
     if (this.mode !== 'playing') return
-    this.wheelOpen = false; this.wheelPinned = false; this.phoneOpen = false
+    this.closeOverlays({ keepDrawer: true })
     this.touchControls.releaseAll()
-    this.mode = 'pause'; this.ui.showPause(); this.input.unlockPointer(); this.persist()
+    this.mode = 'pause'
+    this.ui.showPause()
+    this.syncPointerLock()
+    this.persist()
   }
 
-  private openMap(): void { this.wheelOpen = false; this.wheelPinned = false; this.phoneOpen = false; this.mode = 'map'; this.ui.showMap(); this.input.unlockPointer() }
+  private openMap(): void {
+    this.closeOverlays({ keepDrawer: true })
+    this.mode = 'map'
+    this.ui.showMap()
+    this.syncPointerLock()
+  }
 
   private quit(): void {
     this.cutscenes.stop()
     this.cutsceneWeather = undefined
-    this.wheelOpen = false
-    this.wheelPinned = false
+    this.closeOverlays()
     this.statsOpen = false
-    this.phoneOpen = false
     this.taxiRide = null
     this.lastHailedCabPos = null
     this.touchControls.releaseAll()
     this.player.root.visible = !this.vehicles.active
-    this.mode = 'title'; this.ui.showTitle(); this.input.unlockPointer(); this.persist()
+    this.mode = 'title'
+    this.ui.showTitle()
+    this.syncPointerLock()
+    this.persist()
   }
 
   private cycleWeather(): void {
@@ -702,37 +1380,8 @@ export class ViceGame {
     playMissionCard(title); this.ui.toast(this.missions.objective)
   }
 
-  private currentSightingObservation() {
-    const active = this.vehicles.active
-    return {
-      masked: this.knowledge.masked,
-      outfit: this.knowledge.currentOutfit,
-      brandishedWeaponClass: this.holstered ? null : this.arsenal.current.category,
-      vehicle: active
-        ? {
-            model: active.name,
-            color: active.colorName,
-            plateNumber: active.plateNumber,
-            damageState: active.health > 82 ? 'Intact' : active.health > 45 ? 'Dented' : 'Wrecked',
-          }
-        : null,
-    }
-  }
-
-  private currentWitnessObservation() {
-    const active = this.vehicles.active
-    return {
-      sawFace: !this.knowledge.masked,
-      outfitId: this.knowledge.currentOutfit.id,
-      weaponClass: this.holstered ? null : this.arsenal.current.category,
-      vehicleModel: active ? active.name : null,
-      vehicleColor: active ? active.colorName : null,
-      vehiclePlate: active ? active.plateNumber : null,
-    }
-  }
-
   private reportCrime(origin: THREE.Vector3, severity: number, options: { immediate?: boolean; escalateIfEqual?: boolean; toast?: string } = {}): void {
-    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
+    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers())
     if (policeSee || options.immediate || this.heat.wanted > 0) {
       const prev = this.heat.wanted
       if (policeSee) this.knowledge.recordSighting(this.currentSightingObservation())
@@ -807,7 +1456,7 @@ export class ViceGame {
       this.audio.hitmarker('critical')
     }
     this.reportCrime(pos, lifeExp.copsDown > 0 ? 3 : 2, {
-      immediate: lifeExp.copsDown > 0 || this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted),
+      immediate: lifeExp.copsDown > 0 || this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers()),
       escalateIfEqual: true,
     })
   }
@@ -907,9 +1556,11 @@ export class ViceGame {
     let hitCop = false
     let hitCritical = false
     let hitArmor = false
+    let hitNonLethal = false
     let anyKilled = false
     let warStarted: TurfZoneState | null = null
     let capturedZone: TurfZoneState | null = null
+    const dmgBoost = 1 + (this.partner.active ? bondBonusMultipliers(this.save.partnerBond ?? 32).damageBoost : 0)
 
     for (let i = 0; i < spec.pellets; i += 1) {
       const dir = baseDir.clone()
@@ -919,17 +1570,31 @@ export class ViceGame {
       dir.normalize()
 
       const range = worldRayDistance(start, dir, this.world.colliders, spec.range)
-      const lifeHit = this.life.shootBallistic(start, dir, range, spec.damage, spec.armorPenetration, i === 0 ? noiseRadius : 0)
-      const turfHit = this.turf.shootBallistic(start, dir, range, spec.damage, spec.armorPenetration)
+      const lifeHit = this.life.shootBallistic(start, dir, range, spec.damage * dmgBoost, spec.armorPenetration, i === 0 ? noiseRadius : 0)
+      const turfHit = this.turf.shootBallistic(start, dir, range, spec.damage * dmgBoost, spec.armorPenetration)
+      const storeHit = this.storeWorld.shootTarget(start, dir, range)
       const propHit = this.props.shoot(start, dir, range)
 
-      const hit = lifeHit.hit || turfHit.hit || propHit
+      if (storeHit.hitCctv) {
+        this.audio.impact()
+        this.ui.toast('CCTV CAMERA SHOT OUT — SILENT ALARM DISABLED!')
+      }
+      if (storeHit.smashedCaseStore && storeHit.lootGained > 0) {
+        this.save.uncleanedLoot = (this.save.uncleanedLoot ?? 0) + storeHit.lootGained
+        this.storeWorld.startHoldup(storeHit.smashedCaseStore)
+        this.audio.impact()
+        this.ui.toast(`DISPLAY CASE SMASHED +$${storeHit.lootGained} UNCLEANED LOOT`)
+        this.reportCrime(storeHit.smashedCaseStore.worldCenter, 2, { immediate: true })
+      }
+
+      const hit = lifeHit.hit || turfHit.hit || propHit || Boolean(storeHit.hitCctv || storeHit.smashedCaseStore)
       if (lifeHit.hit) {
         anyPersonHit = true
         if (lifeHit.hitType === 'cop') hitCop = true
         if (lifeHit.critical) hitCritical = true
         if (lifeHit.armorBroken) hitArmor = true
         if (lifeHit.killed) anyKilled = true
+        if (lifeHit.nonLethal) hitNonLethal = true
       }
       if (turfHit.hit) {
         anyPersonHit = true
@@ -949,14 +1614,26 @@ export class ViceGame {
     }
 
     if (anyPersonHit) {
-      const hmKind = hitCritical ? 'critical' : hitArmor ? 'armor' : 'normal'
+      const hmKind = hitCritical ? 'critical' : hitArmor ? 'armor' : hitNonLethal && !anyKilled ? 'nonlethal' : 'normal'
       this.ui.triggerHitmarker(hmKind)
-      this.audio.hitmarker(hmKind)
+      this.audio.hitmarker(hmKind === 'nonlethal' ? 'normal' : hmKind)
+      if (anyKilled) {
+        this.save.conductScore = THREE.MathUtils.clamp((this.save.conductScore ?? 0) - 4, -100, 100)
+      }
       const promo = this.rpg.recordWeaponHit(hitCritical, anyKilled)
       if (promo.tierPromoted) {
         this.ui.toast(`WEAPON SKILL PROMOTED: ${promo.tierPromoted}!`)
       }
       this.handleTurfZoneEvents(warStarted, capturedZone)
+    }
+
+    // Firing inside any store immediately initiates holdup & can drop guard
+    const nearStore = this.storeWorld.findNearestInteractable(this.player.root.position, 6.2)
+    if (nearStore?.isInside) {
+      this.storeWorld.startHoldup(nearStore.store)
+      if (this.storeWorld.neutralizeNearestGuard(this.player.root.position, 9)) {
+        this.ui.toast('SECURITY GUARD NEUTRALIZED!')
+      }
     }
 
     if (!suppressed) {
@@ -966,7 +1643,7 @@ export class ViceGame {
       }
     }
 
-    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
+    const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers())
     if (!suppressed || anyPersonHit || policeSee) {
       this.reportCrime(this.player.root.position, hitCop ? 3 : anyPersonHit ? 2 : 1, {
         immediate: hitCop || (anyPersonHit && policeSee),
@@ -982,11 +1659,10 @@ export class ViceGame {
 
   private toggleVehicle(): void {
     if (this.taxiRide) {
-      this.player.root.position.set(this.taxiRide.cabPos.x + 2.1, 0.2, this.taxiRide.cabPos.z)
-      resolvePlayerCollision(this.player.root.position, this.world.spawn, this.world.colliders)
-      this.player.root.visible = true
+      const cabExit = new THREE.Vector3(this.taxiRide.cabPos.x + 2.1, 0.2, this.taxiRide.cabPos.z)
       this.taxiRide = null
       this.life.consumeServiceUnit('taxi')
+      this.clearActiveRide(cabExit, this.world.spawn)
       this.ui.toast('Exited Yellow Cab')
       this.persist()
       return
@@ -996,27 +1672,17 @@ export class ViceGame {
       if (Math.abs(v.speed) > 12 && v.type !== 'helicopter' && v.type !== 'boat') {
         const bail = this.vehicles.bailout()
         if (bail) {
-          this.player.root.position.copy(bail.exitPos)
-          resolvePlayerCollision(this.player.root.position, bail.exitPos, this.world.colliders)
-          this.player.root.visible = true
+          this.clearActiveRide(bail.exitPos, bail.exitPos)
           this.player.launchRagdollTumble(bail.velocity)
           this.save.health = Math.max(0, this.save.health - 8)
           this.audio.crashSynth(11, false)
           this.input.padRumble(0.75, 180)
-          this.heat.onVehicleChanged(null)
-          this.prevEngineStalled = false
           this.ui.toast('HIGH-SPEED BAILOUT! (-8 HP)')
           this.persist()
         }
       } else {
         const exit = this.vehicles.exit()
-        if (exit) {
-          this.player.root.position.copy(exit)
-          resolvePlayerCollision(this.player.root.position, exit, this.world.colliders)
-        }
-        this.heat.onVehicleChanged(null)
-        this.prevEngineStalled = false
-        this.player.root.visible = true
+        this.clearActiveRide(exit ?? undefined, exit ?? undefined)
         this.ui.toast('Exited vehicle')
         this.persist()
       }
@@ -1029,7 +1695,7 @@ export class ViceGame {
       this.player.root.visible = false
       const swapped = this.heat.onVehicleChanged(nearest)
       if (swapped) {
-        const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
+        const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers())
         this.knowledge.onVehicleUpdated({
           model: nearest.name,
           color: nearest.colorName,
@@ -1050,21 +1716,20 @@ export class ViceGame {
   private interact(): boolean {
     const p = this.player.root.position
     const active = this.vehicles.active
+    const near = this.scanNearbyInteractables(p)
 
-    // Pay 'n' Spray Garage ($150 repair, respray & plate swap)
-    const bay = this.world.resprayBays.find(item => p.distanceTo(item.position) < item.radius)
-    if (bay) {
+    if (near.bay) {
       if (!active) {
-        this.ui.toast(`${bay.name}: Drive a vehicle inside ($${bay.price})`)
+        this.ui.toast(`${near.bay.name}: Drive a vehicle inside ($${near.bay.price})`)
         return true
       }
-      if (this.save.money < bay.price) {
-        this.ui.toast(`${bay.name}: Need $${bay.price}`)
+      if (this.save.money < near.bay.price) {
+        this.ui.toast(`${near.bay.name}: Need $${near.bay.price}`)
         return true
       }
-      this.save.money -= bay.price
+      this.save.money -= near.bay.price
       const resprayInfo = this.vehicles.respray(active)
-      const policeSee = this.life.hasPoliceLineOfSight(p, this.heat.wanted)
+      const policeSee = this.life.hasPoliceLineOfSight(p, this.heat.wanted, this.currentRecognitionModifiers())
       this.knowledge.onVehicleUpdated({
         model: active.name,
         color: resprayInfo.colorName,
@@ -1073,14 +1738,12 @@ export class ViceGame {
       }, policeSee)
       this.heat.onVehicleChanged(active)
       this.audio.phoneTone('respray')
-      this.ui.toast(`PAY 'N' SPRAY: REPAIRED & NEW PLATE [${resprayInfo.plateNumber}] (-$${bay.price})`)
+      this.ui.toast(`PAY 'N' SPRAY: REPAIRED & NEW PLATE [${resprayInfo.plateNumber}] (-$${near.bay.price})`)
       this.persist()
       return true
     }
 
-    // Dispatched 911 / Cab / Little Jacob street units
-    const nearAmb = this.life.getServiceUnitState('ambulance', p, 6)
-    if (nearAmb) {
+    if (near.amb) {
       this.life.consumeServiceUnit('ambulance')
       this.save.health = 100
       this.ui.toast('AMBULANCE PARAMEDIC: HEALTH RESTORED TO 100')
@@ -1095,71 +1758,52 @@ export class ViceGame {
       this.ui.toast('YELLOW CAB HAILED — PICK BACKSEAT RIDE ($20) OR SKIP ($30)')
       return true
     }
-    const nearJacob = this.life.getServiceUnitState('arms_van', p, 6.5)
-    if (nearJacob) {
+    if (near.jacob) {
       this.setPhoneOpen(true)
       this.ui.phone.setApp('jacob')
       this.ui.toast('LITTLE JACOB ARMS VAN — SELECT KEVLAR OR AMMO')
       return true
     }
 
-    const store = this.world.stores.find(item => !this.robbedStores.has(item.id) && p.distanceTo(item.position) < item.radius)
-    if (store) {
-      this.robbedStores.add(store.id)
-      this.save.robbedStores = [...this.robbedStores]
-      this.save.money += store.reward
-      this.knowledge.recordSighting(this.currentSightingObservation())
-      this.heat.reportCrime(p, 2, { immediate: true, policeSeePlayer: true, escalateIfEqual: true })
-      this.audio.robbery()
-      this.audio.dispatchRadio(this.heat.wanted)
-      this.ui.toast(`${store.name} HIT  +$${store.reward.toLocaleString()}  — BREAK SIGHT & MOVE`)
-      this.persist()
+    if (near.nearPersonalTrunk) {
+      this.openTrunkDrawer()
       return true
     }
-
-    const gym = this.world.gyms.find(item => p.distanceTo(item.position) < item.radius)
-    if (gym) {
-      const gain = this.rpg.recordGymRep(gym.kind)
+    if (!active && near.storeWorld) {
+      this.openStoreDrawer(near.storeWorld.store.spec.id)
+      return true
+    }
+    if (near.gym) {
+      const gain = this.rpg.recordGymRep(near.gym.kind)
       this.player.setPhysique(this.rpg.muscle, this.rpg.fat)
       this.audio.gymRep()
-      this.ui.toast(`${gym.name.toUpperCase()}: +${gain.muscleGain} MUSCLE · +${gain.staminaGain} STAMINA`)
+      this.ui.toast(`${near.gym.name.toUpperCase()}: +${gain.muscleGain} MUSCLE · +${gain.staminaGain} STAMINA`)
       this.persist()
       return true
     }
-
-    const stand = this.world.foodStands.find(item => p.distanceTo(item.position) < item.radius)
-    if (stand) {
-      if (this.save.money < stand.price) {
-        this.ui.toast(`${stand.name}: Need $${stand.price}`)
+    if (near.stand) {
+      if (this.save.money < near.stand.price) {
+        this.ui.toast(`${near.stand.name}: Need $${near.stand.price}`)
         return true
       }
-      this.save.money -= stand.price
-      const meal = this.rpg.eatMeal(stand.mealSize)
+      this.save.money -= near.stand.price
+      const meal = this.rpg.eatMeal(near.stand.mealSize)
       this.save.health = Math.min(100, this.save.health + meal.healthGain)
       this.player.setPhysique(this.rpg.muscle, this.rpg.fat)
       this.audio.phoneTone('hotdog')
-      this.ui.toast(`${stand.name}: ATE MEAL (-$${stand.price}) · HEALTH + HUNGER RESTORED`)
+      this.ui.toast(`${near.stand.name}: ATE MEAL (-$${near.stand.price}) · HEALTH + HUNGER RESTORED`)
       this.persist()
       return true
     }
-
-    if (!this.missions.current && Math.hypot(p.x + 8, p.z) < 7) {
+    if (near.atIntroBeacon) {
       this.startMission('intro')
       return true
     }
-    if (this.world.safehouses.some(home => p.distanceTo(home.position) < home.radius + 4)) {
-      const policeSee = this.life.hasPoliceLineOfSight(p, this.heat.wanted)
-      const { outfit } = this.knowledge.cycleOutfit(policeSee)
-      this.player.setOutfit(outfit)
+    if (near.atSafehouse) {
+      const { outfit } = this.swapDisguiseOutfit()
       const cooled = this.heat.clearAtSafehouse()
       if (cooled) this.knowledge.reset()
-      this.arsenal.addAmmo('handgun', 45)
-      this.arsenal.addAmmo('smg', 90)
-      this.arsenal.addAmmo('shotgun', 16)
-      this.arsenal.addAmmo('rifle', 60)
-      this.arsenal.addAmmo('precision', 15)
-      this.arsenal.addAmmo('heavy', 4)
-      this.arsenal.addAmmo('throwable', 3)
+      this.restockAllAmmo('safehouse')
       if (this.save.health < 100 || cooled) {
         this.save.health = 100
         this.ui.toast(cooled ? `Safehouse (${outfit.label}): heat cleared, wardrobe swapped & ammo restocked` : `Safehouse (${outfit.label}): health & ammo restocked`)
@@ -1212,19 +1856,18 @@ export class ViceGame {
       if (this.input.consume('confirm')) this.ui.activateFocusedMenu()
       if (this.input.consume('back')) this.ui.backMenu()
     }
-    if (this.input.consume('map') && this.mode === 'playing') this.openMap()
+    if (this.input.consume('map')) {
+      if (this.mode === 'playing') this.openMap()
+      else if (this.mode === 'map') this.resume()
+    }
     if (this.input.consume('weather') && this.mode === 'playing') this.cycleWeather()
     const look = this.input.takeLook()
 
-    // 25% Tactical Slow-Mo Weapon Wheel toggle while holding TAB / RB or pinned on touch
+    // 25% Tactical Slow-Mo Weapon Wheel or 38% Combat Focus Slow-Mo
     const wantWheel = this.mode === 'playing' && (this.wheelPinned || this.input.held('wheel'))
     if (wantWheel !== this.wheelOpen) {
       this.wheelOpen = wantWheel
-      if (this.wheelOpen) {
-        this.input.unlockPointer()
-      } else if (this.mode === 'playing') {
-        this.input.lockPointer()
-      }
+      this.syncPointerLock()
     }
     if (this.wheelOpen && this.input.method === 'gamepad') {
       const sx = Math.abs(this.input.sticks.rx) > 0.45 ? this.input.sticks.rx : this.input.sticks.lx
@@ -1238,17 +1881,22 @@ export class ViceGame {
           const curIdx = list.findIndex(w => w.id === this.arsenal.equippedId)
           const next = list[(curIdx + this.input.menuNav.x + list.length) % list.length]
           this.arsenal.selectWeapon(next.id)
-          this.holstered = false
-          this.player.setHolstered(false)
-          this.syncWeaponVisual()
-          this.ui.toast(`EQUIPPED: ${next.name.toUpperCase()}`)
+          this.equipWeaponSpec(next, `EQUIPPED: ${next.name.toUpperCase()}`)
         }
       }
     }
 
-    const simDt = this.wheelOpen ? dt * 0.25 : dt
+    if (this.focusActive && this.mode === 'playing' && !this.wheelOpen) {
+      this.focusGauge = Math.max(0, this.focusGauge - dt * 24)
+      if (this.focusGauge <= 0) this.focusActive = false
+    } else {
+      this.focusGauge = Math.min(100, this.focusGauge + dt * 11)
+    }
+
+    const simDt = this.wheelOpen ? dt * 0.25 : this.focusActive ? dt * 0.38 : dt
     this.shotCooldown = Math.max(0, this.shotCooldown - simDt)
     this.weaponHotTimer = Math.max(0, this.weaponHotTimer - simDt)
+    this.fuelNoticeCooldown = Math.max(0, this.fuelNoticeCooldown - simDt)
 
     this.crankSoundCooldown = Math.max(0, this.crankSoundCooldown - simDt)
 
@@ -1271,16 +1919,14 @@ export class ViceGame {
       }
 
       if (this.input.consume('mask')) {
-        const masked = this.knowledge.toggleMask()
-        this.player.setMasked(masked)
-        this.ui.toast(masked ? 'BANDANA MASK ON — FACE CONCEALED (+EVASION)' : 'BANDANA MASK OFF')
+        this.toggleBandanaMask(true)
       }
       if (this.input.consume('holster')) {
         this.holstered = !this.holstered
         this.player.setHolstered(this.holstered)
         this.ui.toast(this.holstered ? 'WEAPON CONCEALED — UNARMED PROFILE' : `DREW ${this.arsenal.current.shortName}`)
       }
-      if (!this.wheelOpen && !this.phoneOpen) {
+      if (!this.wheelOpen && !this.phoneOpen && !this.drawer) {
         this.yaw -= look.x
         this.pitch = THREE.MathUtils.clamp(this.pitch + look.y, -.15, .65)
       }
@@ -1288,19 +1934,8 @@ export class ViceGame {
       if (this.input.consume('stats')) {
         this.statsOpen = !this.statsOpen
       }
-      if (this.input.consume('cover') && !this.vehicles.active && !this.wheelOpen && !this.phoneOpen) {
-        const carCoords = this.vehicles.vehicles.map(v => ({
-          x: v.root.position.x,
-          z: v.root.position.z,
-          heading: v.heading,
-          halfWidth: 1.05,
-        }))
-        const inCover = this.player.toggleCover(this.world.colliders, carCoords)
-        if (inCover) {
-          this.ui.toast(this.player.cover.coverBehindCar
-            ? 'COVER BEHIND CAR — LMB BLIND-FIRE / RMB AIM PEEK'
-            : 'IN COVER — LMB BLIND-FIRE / RMB AIM PEEK')
-        }
+      if (this.input.consume('cover')) {
+        this.togglePlayerCover(true)
       }
       if (this.input.consume('attach')) {
         const spec = this.arsenal.current
@@ -1311,15 +1946,7 @@ export class ViceGame {
         }
       }
       if (this.input.consume('recruit')) {
-        const res = this.turf.recruitNearby(this.player.root.position, this.rpg.maxHomies)
-        if (res.recruitedNow > 0) {
-          this.audio.recruitWhistle()
-          this.ui.toast(`RECRUITED ${res.recruitedNow} HOMIE${res.recruitedNow > 1 ? 'S' : ''} (SQUAD ${res.totalSquad}/${this.rpg.maxHomies})`)
-        } else if (res.atCap) {
-          this.ui.toast(`SQUAD AT MAX CAPACITY (${res.totalSquad}/${this.rpg.maxHomies}) — RAISE RESPECT!`)
-        } else {
-          this.ui.toast('NO ALLIED VICE CREW HOMIES NEARBY')
-        }
+        this.recruitCrewOrPartner(true)
       }
 
       if (this.input.consume('interact')) {
@@ -1407,17 +2034,22 @@ export class ViceGame {
           }
           if (rx.ejectThroughWindshield) {
             const ejectFrom = active.root.position.clone().add(new THREE.Vector3(-Math.sin(active.heading) * 2.1, 0.7, -Math.cos(active.heading) * 2.1))
-            this.vehicles.exit()
-            this.player.root.position.copy(ejectFrom)
-            resolvePlayerCollision(this.player.root.position, active.root.position, this.world.colliders)
-            this.player.root.visible = true
+            this.clearActiveRide(ejectFrom, active.root.position)
             this.player.launchRagdollTumble(rx.ejectionVelocity)
             this.save.health = Math.max(0, this.save.health - 28)
-            this.heat.onVehicleChanged(null)
-            this.prevEngineStalled = false
             this.ui.toast('LAUNCHED THROUGH WINDSHIELD! (-28 HP)')
             this.persist()
           }
+        }
+        const secStep = this.vehicles.stepSecurityAndFuel(simDt, this.save.fuelEnabled !== false, Math.abs(active.speed) / 34)
+        if (secStep.trackerPing) {
+          this.heat.reportCrime(active.root.position, Math.max(2, this.heat.wanted), { immediate: true, policeSeePlayer: true })
+          this.audio.dispatchAlert()
+          this.ui.toast('EXOTIC GPS TRACKER PINGED POLICE — STRIP AT CHOP SHOP!')
+        }
+        if (secStep.outOfFuel && this.fuelNoticeCooldown <= 0) {
+          this.fuelNoticeCooldown = 4.5
+          this.ui.toast('OUT OF FUEL / CHARGE — VISIT SUNSHINE GAS OR VICE CUSTOMS!')
         }
         const tele = this.vehicles.getActiveTelemetry()
         if (tele?.engineStalled && !this.prevEngineStalled) {
@@ -1493,6 +2125,70 @@ export class ViceGame {
         }
       }
 
+      const bondBonuses = bondBonusMultipliers(this.save.partnerBond ?? 32)
+      const storeStep = this.storeWorld.update(simDt, this.player.root.position, {
+        aiming,
+        weaponHot: this.weaponHotTimer > 0 || (!this.holstered && spec.fireMode !== 'melee'),
+        partnerCovering: this.partner.active,
+        bondBoost: bondBonuses.robberySpeedBoost,
+        tattooCount: (this.save.tattoos ?? []).length,
+        conductTier: getConductTier(this.save.conductScore ?? 0),
+      })
+      if (storeStep.alarmTriggered) {
+        this.reportCrime(this.player.root.position, 2, { immediate: true, escalateIfEqual: true })
+        this.ui.toast(storeStep.callout ?? 'SILENT ALARM TRIGGERED!')
+      }
+      if (storeStep.registerCleared) {
+        const { spec: stSpec, cash } = storeStep.registerCleared
+        this.robbedStores.add(stSpec.id)
+        this.save.robbedStores = [...this.robbedStores]
+        this.save.money += cash
+        this.save.conductScore = THREE.MathUtils.clamp((this.save.conductScore ?? 0) - 5, -100, 100)
+        this.rpg.recordRobbery(cash, !storeStep.alarmTriggered)
+        if (this.partner.active) this.save.partnerBond = Math.min(100, (this.save.partnerBond ?? 32) + 4)
+        this.hotZones.addZone({
+          id: stSpec.id,
+          label: stSpec.name,
+          x: stSpec.x,
+          z: stSpec.z,
+          loggedOutfitId: this.knowledge.currentOutfit.id,
+          loggedPlate: this.vehicles.active?.plateNumber ?? null,
+        })
+        this.audio.robbery()
+        this.reportCrime(this.player.root.position, 2, { immediate: true })
+        this.ui.toast(`${stSpec.name.toUpperCase()} REGISTER EMPTIED +$${cash.toLocaleString()}!`)
+        this.persist()
+      }
+
+      const partnerStep = this.partner.update(
+        simDt,
+        this.player.root.position,
+        this.yaw,
+        Boolean(active),
+        active?.heading ?? 0,
+        Boolean(this.storeWorld.getActiveHoldup()),
+        this.life.getNearestThreatPos(this.player.root.position, this.heat.wanted),
+        this.world.colliders,
+      )
+      if (partnerStep.firedAtThreat) {
+        const res = this.life.damageNearestThreat(this.partner.root.position, 34 * (1 + bondBonuses.damageBoost))
+        if (res.hit) {
+          this.audio.shootWeapon('handgun', false)
+          if (res.killed) this.save.partnerBond = Math.min(100, (this.save.partnerBond ?? 32) + 1.5)
+        }
+      }
+
+      const hotZoneCheck = this.hotZones.checkReentry(
+        this.player.root.position,
+        this.knowledge.currentOutfit.id,
+        active?.plateNumber ?? null,
+        this.knowledge.masked,
+      )
+      if (hotZoneCheck.triggeredApb) {
+        this.reportCrime(this.player.root.position, Math.max(2, this.heat.wanted), { immediate: true })
+        this.ui.toast(`APB RECOGNIZED IN HOT ZONE (${hotZoneCheck.zoneLabel}) — SWAP OUTFIT OR CAR!`)
+      }
+
       // San Andreas RPG progression step (stamina, hunger, muscle/fat physique, driving skill)
       const moving = Math.hypot(this.input.move.x, this.input.move.y) > 0.1
       const rpgEvent = this.rpg.update(simDt, {
@@ -1561,15 +2257,20 @@ export class ViceGame {
         this.persist()
       }
 
-      const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted)
+      const policeSee = this.life.hasPoliceLineOfSight(this.player.root.position, this.heat.wanted, this.currentRecognitionModifiers())
       if (policeSee && this.heat.wanted > 0) {
         this.knowledge.recordSighting(this.currentSightingObservation())
       }
       const inStealth = this.world.districtAt(this.player.root.position.x, this.player.root.position.z) === 'The Wetlands'
         || this.world.safehouses.some(home => this.player.root.position.distanceTo(home.position) < home.radius + 8)
       const evasionBonus = this.knowledge.evasionDrainMultiplier(this.vehicles.active?.plateNumber ?? null)
+      this.peakWanted = Math.max(this.peakWanted, this.heat.wanted)
       const heatStep = this.heat.update(simDt, this.player.root.position, policeSee, inStealth, evasionBonus)
       if (this.heat.wanted === 0) {
+        if (this.peakWanted > 0) {
+          this.rpg.recordEvadeHeat(this.peakWanted)
+          this.peakWanted = 0
+        }
         this.knowledge.reset()
       }
       if (heatStep.dispatchConfirmed || heatStep.reinforcementEscalated) {
@@ -1580,13 +2281,25 @@ export class ViceGame {
         this.persist()
       }
 
+      this.turfIncomeAccum += simDt
+      if (this.turfIncomeAccum >= 30) {
+        this.turfIncomeAccum -= 30
+        const benefits = this.turf.getAlliedBenefits()
+        const payout = Math.round((benefits.passiveCashPerMin / 60) * 30)
+        if (payout > 0) {
+          this.save.money += payout
+          this.ui.toast(`CREW TURF INCOME +$${payout.toLocaleString()}`)
+          this.persist(false)
+        }
+      }
+
       const turfStep = this.turf.update(simDt, this.player.root.position, this.yaw, !!this.vehicles.active, this.heat.wanted, this.life.getPoliceBlips())
       if (turfStep.homieEliminatedRival) {
         this.handleTurfZoneEvents(null, turfStep.homieEliminatedRival)
       }
 
       const copDamage = this.life.getDamage(this.player.root.position, simDt, this.heat.wanted)
-      let harm = copDamage + turfStep.playerDamage
+      let harm = copDamage + turfStep.playerDamage + storeStep.guardDamagePlayer
       if (harm > 0 && this.hitCooldown <= 0) {
         if (!this.vehicles.active && this.player.cover.active && this.player.cover.coverBehindCar) {
           this.player.damageCoverCar(harm)
@@ -1606,10 +2319,19 @@ export class ViceGame {
         }
       }
       if (this.save.health <= 0) {
-        this.vehicles.exit(); this.taxiRide = null; this.heat.reset(); this.knowledge.reset(); this.turf.dismissSquad(); this.player.root.visible = true; this.save.health = 100
+        const penalty = applyWastedEconomyPenalty({
+          money: this.save.money,
+          bankBalance: this.save.bankBalance ?? 0,
+          uncleanedLoot: this.save.uncleanedLoot ?? 0,
+        })
+        this.save.money = 0
+        this.save.uncleanedLoot = 0
+        this.taxiRide = null; this.heat.reset(); this.knowledge.reset(); this.turf.dismissSquad(); this.closeDrawer()
+        this.clearActiveRide(this.world.spawn, this.world.spawn)
+        this.save.health = 100
         this.rpg.stamina = 100; this.rpg.exhausted = false; this.playerArmor = 0
-        this.save.money = Math.max(0, this.save.money - 250); this.player.root.position.copy(this.world.spawn)
-        this.ui.toast('WASTED — $250 hospital fee'); this.persist()
+        this.ui.toast(`WASTED — LOST $${(penalty.lostCash + penalty.lostLoot).toLocaleString()} POCKET/LOOT · BANK PROTECTED ($${penalty.bankProtected.toLocaleString()})`)
+        this.persist()
       }
 
       // Persist position, inventory, heat, RPG stats, and turf whenever game state changes
@@ -1633,7 +2355,13 @@ export class ViceGame {
     this.world.update(simDt, focus, this.save.weather)
     if (this.mode === 'playing' || this.mode === 'title') {
       const searchTarget = this.heat.getSearchTarget(focus)
-      this.life.update(simDt, focus, this.mode === 'playing' ? this.heat.wanted : 0, searchTarget)
+      this.life.update(
+        simDt,
+        focus,
+        this.mode === 'playing' ? this.heat.wanted : 0,
+        searchTarget,
+        this.mode === 'playing' && this.heat.phase === 'evading',
+      )
     }
     this.props.update(simDt)
     this.flashTime = Math.max(0, this.flashTime - simDt); this.muzzleFlash.visible = this.flashTime > 0
@@ -1703,7 +2431,12 @@ export class ViceGame {
       this.camera.updateProjectionMatrix()
       this.camera.lookAt(focus.x, focus.y + 1.45, focus.z)
     }
-    this.renderer.render(this.world.scene, this.camera)
+    this.softwareGlRenderAccum += dt
+    const shouldRenderWebGL = !this.renderer.isSoftwareGl || this.capturePhotoNextRender || this.softwareGlRenderAccum >= 0.14
+    if (shouldRenderWebGL) {
+      this.softwareGlRenderAccum = 0
+      this.renderer.render(this.world.scene, this.camera)
+    }
     if (this.capturePhotoNextRender) {
       this.capturePhotoNextRender = false
       try {
@@ -1714,54 +2447,78 @@ export class ViceGame {
       }
     }
 
-    const near = this.vehicles.nearest(focus, 6)
-    let prompt = this.taxiRide
-      ? `CAB TO ${this.taxiRide.label}  ·  ENTER/SPACE SKIP (+$10)  ·  F EXIT`
-      : this.vehicles.active
-        ? (Math.abs(this.vehicles.active.speed) > 12 ? 'F  HIGH-SPEED BAILOUT' : 'F  EXIT VEHICLE')
-        : near ? `F  ENTER ${near.name.toUpperCase()}` : ''
-    const nearbyBay = this.world.resprayBays.find(item => focus.distanceTo(item.position) < item.radius)
-    const nearbyStore = this.world.stores.find(item => focus.distanceTo(item.position) < item.radius && !this.robbedStores.has(item.id))
-    const nearbyGym = this.world.gyms.find(item => focus.distanceTo(item.position) < item.radius)
-    const nearbyStand = this.world.foodStands.find(item => focus.distanceTo(item.position) < item.radius)
-    const nearbyAmb = this.life.getServiceUnitState('ambulance', focus, 6)
-    const nearbyCab = !this.taxiRide && this.life.isCabNearby(focus, 7.5)
-    const nearbyJacob = this.life.getServiceUnitState('arms_van', focus, 6.5)
-    if (!this.taxiRide) {
-      if (nearbyBay) prompt = `E  PAY 'N' SPRAY ($${nearbyBay.price})`
-      else if (nearbyAmb) prompt = 'E  AMBULANCE HEAL (+100 HP)'
-      else if (nearbyCab) prompt = 'E  HAIL YELLOW CAB'
-      else if (nearbyJacob) prompt = 'E  LITTLE JACOB ARMS VAN'
-      else if (nearbyStore) prompt = `E  ROB ${nearbyStore.name}`
-      else if (nearbyGym) prompt = `E  WORK OUT (${nearbyGym.name.toUpperCase()})`
-      else if (nearbyStand) prompt = `E  EAT AT ${nearbyStand.name.toUpperCase()} ($${nearbyStand.price})`
-      else if (!this.missions.current && Math.hypot(focus.x + 8, focus.z) < 7) prompt = 'E  START FIRST CONTRACT'
-      if (this.world.safehouses.some(home => focus.distanceTo(home.position) < home.radius + 4)) prompt = 'E  SAFEHOUSE / WARDROBE / RESTOCK'
-    }
+    const near = this.scanNearbyInteractables(focus)
+    const { prompt, shortPrompt: interactShort } = this.buildInteractionPrompt(near)
+    const personalCar = near.personalCar
+    const nearbyCab = near.cabNearby
+    const nearbyJacob = near.jacob
 
     const minutes = 16 * 60 + 13 + Math.floor(this.elapsed / 6)
     const time = `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
     this.currentTimeLabel = time
-    const target = this.missions.target
+    const target = this.missions.target ?? this.customWaypoint
     const ammoInfo = this.arsenal.getAmmoDisplay(spec)
     const activeWar = this.turf.activeWar
     const apbIntel = this.knowledge.getApbHudIntel(this.vehicles.active?.plateNumber ?? null, this.heat.wanted)
     const apbExpanded = this.input.held('inspect') || this.wheelOpen
     const rawTele = this.vehicles.getActiveTelemetry()
+    const activeHoldup = this.storeWorld.getActiveHoldup()
+    const hzActive = this.hotZones.checkReentry(focus, this.knowledge.currentOutfit.id, this.vehicles.active?.plateNumber ?? null, this.knowledge.masked)
+    const conductScore = this.save.conductScore ?? 0
+    const conductTier = getConductTier(conductScore)
+    const protagonist: ProtagonistId = this.save.protagonist === 'lucia' ? 'lucia' : 'jason'
+    const heatHud = this.heat.getHudState()
+    const turfBenefits = this.turf.getAlliedBenefits()
+    const recMods = this.currentRecognitionModifiers()
 
     this.ui.update({
       money: this.save.money,
+      bankBalance: this.save.bankBalance ?? 0,
+      uncleanedLoot: this.save.uncleanedLoot ?? 0,
       health: this.save.health,
       ammo: ammoInfo.mag,
       weaponName: this.holstered ? `${spec.shortName} [HOLSTERED]` : spec.shortName,
       weaponAmmoText: this.holstered ? 'CONCEALED' : spec.fireMode === 'melee' ? 'MELEE' : `${ammoInfo.mag} / ${ammoInfo.reserve}`,
       stamina: this.rpg.stamina,
+      focusGauge: this.focusGauge,
+      focusActive: this.focusActive,
+      protagonist,
+      partnerActive: this.partner.active,
+      partnerBond: this.save.partnerBond ?? 32,
+      conductTier,
       homies: this.turf.recruitedCount,
       maxHomies: this.rpg.maxHomies,
       turfWar: activeWar ? { zoneName: activeWar.name, wave: activeWar.wave, totalWaves: activeWar.totalWaves, remaining: activeWar.remainingEnemies } : null,
       gangZones: this.turf.getMapZones(),
       homieBlips: this.turf.getHomiePositions(),
       rivalBlips: this.turf.getRivalPositions(),
+      hotZones: this.hotZones.zones.map(z => ({ x: z.x, z: z.z, radius: z.radius, label: z.label })),
+      activeHotZoneLabel: hzActive.inHotZone ? hzActive.zoneLabel : null,
+      stores: STORES_CATALOG.map(s => {
+        const rt = this.storeWorld.states.find(st => st.spec.id === s.id)
+        return {
+          id: s.id,
+          name: s.name,
+          category: s.category,
+          x: s.x,
+          z: s.z,
+          robbed: this.robbedStores.has(s.id),
+          status: rt ? getStoreStatus(rt) : 'open',
+          cooldownSec: rt ? getCooldownRemaining(rt) : 0,
+        }
+      }),
+      activeStoreCategory: this.activeStoreCategory,
+      holdup: activeHoldup
+        ? {
+            storeName: activeHoldup.spec.name,
+            intimidation: activeHoldup.intimidation,
+            registerPct: activeHoldup.registerProgress,
+            safePct: activeHoldup.safeProgress,
+            cctvOn: activeHoldup.cctvActive,
+            guardAlert: !activeHoldup.guardDown && (activeHoldup.alarmTriggered || activeHoldup.intimidation < 40),
+          }
+        : null,
+      drawer: this.drawer,
       wanted: this.heat.wanted,
       speed: Math.abs(this.vehicles.active?.speed ?? 0),
       district: this.world.districtAt(focus.x, focus.z),
@@ -1775,9 +2532,9 @@ export class ViceGame {
       weather: this.save.weather,
       target: target ? { x: target.x, z: target.z } : null,
       safehouses: this.world.safehouses.map(home => ({ x: home.position.x, z: home.position.z })),
-      heat: this.heat.getHudState(),
+      heat: heatHud,
       police: this.life.getPoliceBlips(),
-      policeRadars: this.life.getPoliceRadars(focus, this.heat.wanted),
+      policeRadars: this.life.getPoliceRadars(focus, this.heat.wanted, recMods),
       nearestPursuerDist: this.life.nearestPursuerDistance(focus, this.heat.wanted),
       armor: this.playerArmor,
       apb: apbIntel,
@@ -1791,6 +2548,13 @@ export class ViceGame {
             plateNumber: rawTele.plateNumber,
             windshieldCracked: rawTele.windshieldCracked,
             damagedTire: rawTele.wheelSlip > 0.4,
+            securityTier: rawTele.securityTier,
+            fuel: rawTele.fuel,
+            isElectric: rawTele.isElectric,
+            trackerActive: rawTele.trackerActive,
+            isPersonal: rawTele.isPersonal,
+            alarmActive: rawTele.alarmActive,
+            hotwiringProgress: rawTele.hotwiringProgress,
           }
         : null,
     })
@@ -1800,6 +2564,10 @@ export class ViceGame {
       open: this.phoneOpen && this.mode === 'playing',
       time,
       money: this.save.money,
+      bankBalance: this.save.bankBalance ?? 0,
+      uncleanedLoot: this.save.uncleanedLoot ?? 0,
+      personalCarName: personalCar?.name ?? 'Roman Liberty Cab',
+      protagonist,
       district,
       grittyFilter: this.grittyFilter,
       ringtone: this.ringtone,
@@ -1808,6 +2576,9 @@ export class ViceGame {
       jacobActive: Boolean(nearbyJacob),
       latestPhoto: this.latestPhoto,
       photoCount: this.photoCount,
+      wanted: this.heat.wanted,
+      heatStatus: heatHud.statusText,
+      dispatchEta: heatHud.dispatchEta,
     })
 
     const spreadRad = this.arsenal.effectiveSpread(spec, {
@@ -1831,32 +2602,22 @@ export class ViceGame {
       rpg: this.rpg.getHudState(),
       homieCount: this.turf.recruitedCount,
       turfWar: activeWar ? { zoneName: activeWar.name, wave: activeWar.wave, totalWaves: activeWar.totalWaves, remaining: activeWar.remainingEnemies } : null,
+      focusGauge: this.focusGauge,
+      focusActive: this.focusActive,
+      protagonist,
+      conductTier,
+      conductScore,
+      partnerBond: this.save.partnerBond ?? 32,
+      partnerActive: this.partner.active,
+      loadoutStatus: `SLING: ${LOADOUT_LIMITS.maxHandguns} HG · ${LOADOUT_LIMITS.maxLongGuns} LG`,
+      turfPerksText: `TURF ${turfBenefits.capturedCount}/${turfBenefits.totalDistricts} · +$${turfBenefits.passiveCashPerMin}/MIN · -${turfBenefits.storeDiscountPct}% STORES`,
     })
 
-    const interactShort = nearbyBay
-      ? `SPRAY $${nearbyBay.price}`
-      : nearbyAmb
-        ? 'HEAL +100'
-        : nearbyCab
-          ? 'HAIL CAB'
-          : nearbyJacob
-            ? 'JACOB VAN'
-            : nearbyStore
-              ? `ROB STORE`
-              : nearbyGym
-                ? 'WORK OUT'
-                : nearbyStand
-                  ? `EAT $${nearbyStand.price}`
-                  : (!this.missions.current && Math.hypot(focus.x + 8, focus.z) < 7)
-                    ? 'CONTRACT'
-                    : this.world.safehouses.some(home => focus.distanceTo(home.position) < home.radius + 4)
-                      ? 'SAFEHOUSE'
-                      : ''
     this.touchControls.update({
       visible: this.mode === 'playing',
       inVehicle: Boolean(this.vehicles.active),
       inTaxi: Boolean(this.taxiRide),
-      nearVehicleLabel: near ? `ENTER ${near.name.split(' ')[0].toUpperCase()}` : '',
+      nearVehicleLabel: near.nearVehicle ? `ENTER ${near.nearVehicle.name.split(' ')[0].toUpperCase()}` : '',
       interactLabel: interactShort,
       holstered: this.holstered,
       masked: this.knowledge.masked,

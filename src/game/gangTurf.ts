@@ -32,6 +32,14 @@ export type GangMapZone = {
   warActive: boolean
 }
 
+export type AlliedTurfBenefits = {
+  capturedCount: number
+  totalDistricts: number
+  passiveCashPerMin: number
+  storeDiscountPct: number
+  respectBonus: number
+}
+
 type GangNpc = {
   id: string
   zoneId: string
@@ -124,6 +132,25 @@ export class GangTurfSystem {
 
   get capturedIds(): string[] {
     return this.zones.filter(z => z.faction === 'allied' && z.originalFaction !== 'allied').map(z => z.id)
+  }
+
+  getAlliedBenefits(): AlliedTurfBenefits {
+    const capturedCount = this.capturedIds.length
+    const totalDistricts = Math.max(1, this.zones.filter(z => z.originalFaction !== 'allied').length)
+    return {
+      capturedCount,
+      totalDistricts,
+      passiveCashPerMin: capturedCount * 180,
+      storeDiscountPct: capturedCount * 6,
+      respectBonus: capturedCount * 4,
+    }
+  }
+
+  getZoneAt(x: number, z: number): TurfZoneState | null {
+    for (const zone of this.zones) {
+      if (Math.hypot(x - zone.x, z - zone.z) <= zone.radius) return zone
+    }
+    return null
   }
 
   get activeWar(): TurfZoneState | null {

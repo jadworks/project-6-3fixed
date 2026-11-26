@@ -1,15 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import { MissionDirector } from '../src/game/missionLogic'
-import { loadCitySave, saveCityProgress } from '../src/game/saveSystem'
+import {
+  clearPendingCloudSync,
+  hasPendingCloudSync,
+  loadCitySave,
+  markPendingCloudSync,
+  saveCityProgress,
+} from '../src/game/saveSystem'
+import { DEFAULT_CONFIG } from '../src/game/config'
 import { HeatSystem } from '../src/game/heatSystem'
 import { CityLife } from '../src/game/cityLife'
+import { PoliceKnowledgeSystem } from '../src/game/policeKnowledge'
 import { persistPlayerState } from '../src/firebase/cloudStore'
 import { hasLineOfSight, resolvePlayerCollision, resolveVehicleWorldCollision, supportHeightAt, worldRayDistance } from '../src/game/worldCollision'
 import { WitnessManager } from '../src/game/witnessManager'
 import { WEAPON_SECTORS, WeaponArsenal } from '../src/game/weapons'
 import { SanAndreasRpg } from '../src/game/sanAndreasRpg'
 import { GangTurfSystem } from '../src/game/gangTurf'
+import { getCooldownRemaining, getStoreStatus } from '../src/game/storeWorld'
+import { applyFallImpactRagdoll, createRagdollRig, stepRagdoll } from '../src/game/ragdoll'
 import { WantedHUD } from '../src/components/WantedHUD'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -174,6 +184,24 @@ describe('Vice Bay contracts', () => {
 
     // Roadblocks sit 32m ahead/behind search target along z; test spike strip hit at roadblock 0
     expect(life.checkSpikeStripHit(new THREE.Vector3(0, 0.4, 32), 3)).toBe(true)
+  })
+
+  it('stages newly dispatched cops far down the street with a response delay before closing in and firing', () => {
+    const scene = new THREE.Scene()
+    const life = new CityLife(scene)
+    const origin = new THREE.Vector3(0, 0.2, 16)
+
+    // Initial crime dispatch transitions wanted 0 -> 1: cops spawn far away and take time before firing
+    life.update(0.1, origin, 1, origin)
+    expect(life.getDispatchEta()).toBeGreaterThan(4.5)
+    expect(life.nearestPursuerDistance(origin, 1)).toBeGreaterThan(55)
+    expect(life.getDamage(origin, 0.1, 1)).toBe(0)
+
+    // HeatSystem indicates dispatch en route until police arrive in line-of-sight
+    const heat = new HeatSystem()
+    heat.reportCrime(origin, 1, { immediate: true, policeSeePlayer: false })
+    expect(heat.inSight).toBe(false)
+    expect(heat.getHudState().statusText).toContain('DISPATCH EN ROUTE')
   })
 
   it('WitnessManager checks 45m LOS radius, runs 3.5s 911 state machine, and emits dispatch/cancelled events', () => {
@@ -387,5 +415,104 @@ describe('Vice Bay contracts', () => {
     expect(captured).toBe(true)
     expect(downtown.faction).toBe('allied')
     expect(turf.capturedIds).toContain('downtown')
+
+    const benefits = turf.getAlliedBenefits()
+    expect(benefits.capturedCount).toBeGreaterThanOrEqual(2)
+    expect(benefits.passiveCashPerMin).toBeGreaterThan(0)
+    expect(benefits.storeDiscountPct).toBeGreaterThan(0)
+  })
+
+  it('supports configurable 5-10s police dispatch latency, recognition clue shrinking, and LKP non-telepathic search', () => {
+    expect(DEFAULT_CONFIG.police.dispatchLatencySeconds).toBeGreaterThanOrEqual(5)
+    expect(DEFAULT_CONFIG.police.dispatchLatencySeconds).toBeLessThanOrEqual(10)
+
+    const customHeat = new HeatSystem({ dispatchLatencySeconds: 8.5 })
+    const crimePos = new THREE.Vector3(0, 0, 10)
+    customHeat.reportCrime(crimePos, 1, { immediate: true, policeSeePlayer: false })
+    expect(customHeat.getDispatchEta()).toBeCloseTo(8.5, 2)
+    expect(customHeat.getHudState().dispatchEta).toBeCloseTo(8.5, 2)
+    expect(customHeat.getHudState().statusText).toContain('8.5S')
+
+    customHeat.update(4.0, new THREE.Vector3(35, 0, 10), false, false)
+    expect(customHeat.getDispatchEta()).toBeCloseTo(4.5, 2)
+
+    const knowledge = new PoliceKnowledgeSystem()
+    knowledge.recordSighting({
+      masked: false,
+      outfit: knowledge.currentOutfit,
+      brandishedWeaponClass: 'handgun',
+      vehicle: { model: 'Comet', color: 'Red', plateNumber: 'HOT-101', damageState: 'Intact' },
+    })
+    knowledge.toggleMask()
+    knowledge.cycleOutfit(false)
+    const mods = knowledge.recognitionModifiers('CLEAN-999')
+    expect(mods.rangeMult).toBeLessThan(0.75)
+    expect(mods.fovMult).toBeLessThan(0.95)
+
+    const life = new CityLife(new THREE.Scene())
+    life.setDispatchLatency(8.0)
+    const hiddenPlayer = new THREE.Vector3(240, 0.2, 240)
+    const lkp = new THREE.Vector3(0, 0.2, 0)
+    life.update(0.1, hiddenPlayer, 2, lkp, true)
+    expect(life.getDispatchEta()).toBeCloseTo(7.9, 1)
+    const policeBlips = life.getPoliceBlips()
+    expect(policeBlips.length).toBeGreaterThan(0)
+    expect(policeBlips.some(b => Math.hypot(b.x - hiddenPlayer.x, b.z - hiddenPlayer.z) < 35)).toBe(false)
+    const shrunkRadars = life.getPoliceRadars(hiddenPlayer, 2, mods)
+    const baseRadars = life.getPoliceRadars(hiddenPlayer, 2)
+    if (shrunkRadars.length > 0 && baseRadars.length > 0) {
+      expect(shrunkRadars[0].range).toBeLessThan(baseRadars[0].range)
+    }
+  })
+
+  it('tracks store status/cooldowns, RPG robbery & heat-evasion progression, ragdoll limb recovery, and pending cloud sync flags', () => {
+    expect(getStoreStatus({ holdupActive: true, alarmTriggered: false, robbedCooldown: 0 })).toBe('holdup_active')
+    expect(getStoreStatus({ holdupActive: false, alarmTriggered: true, robbedCooldown: 0 })).toBe('alarm_locked')
+    expect(getStoreStatus({ holdupActive: false, alarmTriggered: false, robbedCooldown: 18.2 })).toBe('robbed_cooldown')
+    expect(getStoreStatus({ holdupActive: false, alarmTriggered: false, robbedCooldown: 0 })).toBe('open')
+    expect(getCooldownRemaining({ robbedCooldown: 18.2 })).toBe(19)
+
+    const rpg = new SanAndreasRpg()
+    const baseRespect = rpg.respect
+    rpg.recordRobbery(900, true)
+    rpg.recordEvadeHeat(3)
+    expect(rpg.respect).toBeGreaterThan(baseRespect)
+
+    const rig = createRagdollRig()
+    const pos = new THREE.Vector3(0, 0.04, 0)
+    expect(applyFallImpactRagdoll(rig, pos, -8.5)).toBe(true)
+    expect(rig.state).toBe('falling')
+
+    rig.state = 'recovering'
+    rig.stateTimer = 0.2
+    const nodes = {
+      root: new THREE.Group(),
+      model: new THREE.Group(),
+      leftArm: new THREE.Group(),
+      rightArm: new THREE.Group(),
+      leftLeg: new THREE.Group(),
+      rightLeg: new THREE.Group(),
+    }
+    nodes.leftArm.rotation.x = -1.2
+    nodes.rightLeg.rotation.x = 0.6
+    stepRagdoll(rig, nodes, 0.1)
+    expect(Math.abs(nodes.leftArm.rotation.x)).toBeLessThan(1.2)
+    expect(Math.abs(nodes.rightLeg.rotation.x)).toBeLessThan(0.6)
+    stepRagdoll(rig, nodes, 0.15)
+    expect(rig.state).toBe('upright')
+    expect(nodes.leftArm.rotation.x).toBe(0)
+    expect(nodes.rightLeg.rotation.x).toBe(0)
+
+    const store = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+      removeItem: (key: string) => store.delete(key),
+    })
+    expect(hasPendingCloudSync()).toBe(false)
+    markPendingCloudSync()
+    expect(hasPendingCloudSync()).toBe(true)
+    clearPendingCloudSync()
+    expect(hasPendingCloudSync()).toBe(false)
   })
 })
