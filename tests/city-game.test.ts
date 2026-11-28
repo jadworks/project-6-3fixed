@@ -305,6 +305,8 @@ describe('Vice Bay contracts', () => {
       cooldownProgress: 0,
       reinforcementProgress: 0.4,
       searchRadius: 48,
+      dispatchEta: 0,
+      dispatchLatency: 6.5,
       lkp: null,
       witnesses: [],
       dispatchBanner: null,
@@ -323,6 +325,8 @@ describe('Vice Bay contracts', () => {
       cooldownProgress: 0.6,
       reinforcementProgress: 0,
       searchRadius: 56,
+      dispatchEta: 0,
+      dispatchLatency: 5.0,
       lkp: { x: 0, z: 0 },
       witnesses: [],
       dispatchBanner: null,
@@ -417,7 +421,8 @@ describe('Vice Bay contracts', () => {
     expect(turf.capturedIds).toContain('downtown')
 
     const benefits = turf.getAlliedBenefits()
-    expect(benefits.capturedCount).toBeGreaterThanOrEqual(2)
+    expect(benefits.capturedCount).toBe(1)
+    expect(benefits.totalDistricts).toBe(3)
     expect(benefits.passiveCashPerMin).toBeGreaterThan(0)
     expect(benefits.storeDiscountPct).toBeGreaterThan(0)
   })
@@ -454,7 +459,9 @@ describe('Vice Bay contracts', () => {
     const hiddenPlayer = new THREE.Vector3(240, 0.2, 240)
     const lkp = new THREE.Vector3(0, 0.2, 0)
     life.update(0.1, hiddenPlayer, 2, lkp, true)
-    expect(life.getDispatchEta()).toBeCloseTo(7.9, 1)
+    expect(life.getDispatchEta()).toBeCloseTo(8.0, 2)
+    life.update(0.1, hiddenPlayer, 2, lkp, true)
+    expect(life.getDispatchEta()).toBeCloseTo(7.9, 2)
     const policeBlips = life.getPoliceBlips()
     expect(policeBlips.length).toBeGreaterThan(0)
     expect(policeBlips.some(b => Math.hypot(b.x - hiddenPlayer.x, b.z - hiddenPlayer.z) < 35)).toBe(false)

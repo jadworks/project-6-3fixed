@@ -26,8 +26,8 @@ export type HeatHudState = {
   witnessProgress: number  // 0..1 (progress of witness reporting crime)
   reinforcementProgress: number // 0..1 (buildup toward next police reinforcement wave)
   statusText: string
-  dispatchEta: number
-  dispatchLatency: number
+  dispatchEta?: number
+  dispatchLatency?: number
   lkp: { x: number; z: number } | null
   searchRadius: number
   dispatchBanner: { code: string; text: string; level: number } | null
@@ -393,7 +393,7 @@ export class HeatSystem {
     else if (this.phase === 'pursuit') statusText = 'IN SIGHT — ACTIVE PURSUIT'
     else if (this.phase === 'evading') {
       statusText = this.dispatchEta > 0
-        ? `DISPATCH ETA ${this.dispatchEta.toFixed(1)}S — UNITS INBOUND`
+        ? `DISPATCH EN ROUTE · ETA ${this.dispatchEta.toFixed(1)}S`
         : this.vehicleSwapBonusTimer > 0
           ? 'VEHICLE SWAPPED — EVADING FAST'
           : 'OUT OF SIGHT — SEARCHING LKP'

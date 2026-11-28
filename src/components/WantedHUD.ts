@@ -175,14 +175,18 @@ export class WantedHUD {
       this.heatWrap.hidden = !showHeat
       if (heat && showHeat) {
         this.heatWrap.dataset.phase = heat.phase
-        if (this.heatStatus && this.heatStatus.textContent !== heat.statusText) {
-          this.heatStatus.textContent = heat.statusText
-        }
+        const eta = heat.dispatchEta ?? 0
+        const showEta = eta > 0.05 && !heat.inSight && heat.wanted > 0
         if (this.dispatchEtaEl) {
-          const showEta = heat.dispatchEta > 0.05 && !heat.inSight && heat.wanted > 0
           this.dispatchEtaEl.hidden = !showEta
           if (showEta) {
-            this.dispatchEtaEl.textContent = `ETA ${heat.dispatchEta.toFixed(1)}S`
+            this.dispatchEtaEl.textContent = `ETA ${eta.toFixed(1)}S`
+          }
+        }
+        if (this.heatStatus) {
+          const displayStatus = showEta ? heat.statusText.replace(/\s*·\s*ETA\s+[\d.]+S/i, '') : heat.statusText
+          if (this.heatStatus.textContent !== displayStatus) {
+            this.heatStatus.textContent = displayStatus
           }
         }
         const pct = heat.phase === 'witness'
